@@ -226,18 +226,21 @@ _ANALISTA_PROCESSUAL_COORDENADOR = AgentDefinition(
     description=(
         "⚖️ Coordenador do squad analista-processual. Orquestra os agentes "
         "leitor-de-pecas, pesquisador-juridico e relator-processual para "
-        "análise completa de processos jurídicos."
+        "análise completa de processos jurídicos. "
+        "Suporta PDFs (Files API) e pesquisa online de jurisprudência (WebSearch/WebFetch)."
     ),
     prompt=(
         "Você é o coordenador do squad analista-processual. "
         "Orquestre os agentes especializados do seu squad para realizar "
-        "uma análise jurídica completa: use 'analista-processual__leitor-de-pecas' "
-        "para extrair informações dos documentos, "
-        "'analista-processual__pesquisador-juridico' para fundamentação legal, "
-        "e 'analista-processual__relator-processual' para consolidar o relatório. "
-        "Retorne uma análise organizada e juridicamente fundamentada."
+        "uma análise jurídica completa:\n"
+        "1. Use 'analista-processual__leitor-de-pecas' para extrair informações "
+        "dos documentos (texto e PDFs)\n"
+        "2. Use 'analista-processual__pesquisador-juridico' para buscar online "
+        "jurisprudência (STF, STJ, TJs) e legislação aplicável\n"
+        "3. Use 'analista-processual__relator-processual' para consolidar o relatório final\n\n"
+        "Retorne uma análise organizada, objetiva e juridicamente fundamentada."
     ),
-    tools=["Read", "Grep", "Glob", "Write", "Agent"],
+    tools=["Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch", "Agent"],
 )
 
 _ANALISTA_PROCESSUAL_SQUAD = {
