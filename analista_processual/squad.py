@@ -17,7 +17,13 @@ Capacidades adicionais:
 import os
 import anyio
 import anthropic
-from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition, ResultMessage
+from claude_agent_sdk import (
+    query,
+    ClaudeAgentOptions,
+    AgentDefinition,
+    ResultMessage,
+    TaskProgressMessage,
+)
 
 from .workspace import DemandaWorkspace
 
@@ -114,7 +120,8 @@ SQUAD_AGENTS = {
         description=(
             "Especialista em elaboração de relatórios processuais. "
             "Consolida as análises do leitor-de-pecas e pesquisador-juridico "
-            "e gera relatórios técnico-jurídicos estruturados em Markdown."
+            "e gera relatórios técnico-jurídicos estruturados em Markdown "
+            "com citações rastreadas por documento e página."
         ),
         prompt=(
             "Você é um relator processual experiente. "
@@ -126,12 +133,88 @@ SQUAD_AGENTS = {
             "4. **Questões Jurídicas Identificadas** — teses principais e subsidiárias\n"
             "5. **Fundamentação Legal** — legislação e jurisprudência aplicável\n"
             "6. **Análise de Mérito** — pontos fortes, pontos fracos, riscos\n"
-            "7. **Conclusões e Recomendações** — posicionamento técnico e próximos passos\n\n"
-            "Use linguagem técnico-jurídica precisa. Formate o relatório em Markdown "
-            "com cabeçalhos, tabelas e listas onde apropriado. "
-            "Salve o relatório em arquivo .md quando um diretório de saída for fornecido."
+            "7. **Análise Estratégica** — riscos, oportunidades, cenários (otimista/realista/pessimista)\n"
+            "8. **Orientações Práticas** — medidas urgentes, plano de ação, prazos críticos\n"
+            "9. **Conclusões e Recomendações** — posicionamento técnico e próximos passos\n\n"
+            "## Citações Rastreadas\n\n"
+            "Ao final do relatório, inclua um bloco de citações no formato:\n\n"
+            "```citacoes\n"
+            "documento: nome_do_arquivo.pdf\n"
+            "trecho: texto citado ou referenciado\n"
+            "tipo: fundamento_legal|prova|precedente|fato\n"
+            "---\n"
+            "documento: outro_arquivo.pdf\n"
+            "trecho: outro trecho\n"
+            "tipo: fato\n"
+            "```\n\n"
+            "Use linguagem técnico-jurídica precisa. Formate em Markdown com cabeçalhos, "
+            "tabelas e listas. Salve o relatório no caminho especificado no prompt."
         ),
         tools=["Read", "Write", "Grep", "Glob"],
+    ),
+
+    "estrategista-processual": AgentDefinition(
+        description=(
+            "⚔️ Especialista em estratégia jurídico-processual. "
+            "Avalia riscos, oportunidades, vulnerabilidades e projeta cenários de "
+            "desfecho com probabilidades estimadas. Trabalha com base na análise "
+            "do leitor-de-pecas e pesquisador-juridico."
+        ),
+        prompt=(
+            "Você é um estrategista jurídico sênior com 20+ anos de experiência "
+            "em litígios complexos. "
+            "Com base nos documentos e pesquisa jurídica disponíveis, elabore "
+            "uma avaliação estratégica completa:\n\n"
+            "**1. Posicionamento das partes:**\n"
+            "- Pontos fortes e fracos de cada parte\n"
+            "- Qualidade das provas e coerência dos fundamentos\n"
+            "- Vulnerabilidades processuais identificadas\n\n"
+            "**2. Riscos e Oportunidades:**\n"
+            "- Principais riscos de sucumbência (com fatores)\n"
+            "- Oportunidades processuais não exploradas\n"
+            "- Precedentes favoráveis e desfavoráveis\n\n"
+            "**3. Projeção de Cenários:**\n"
+            "- Cenário otimista (probabilidade %): condições e desfecho\n"
+            "- Cenário realista (probabilidade %): condições e desfecho\n"
+            "- Cenário pessimista (probabilidade %): condições e desfecho\n\n"
+            "**4. Viabilidade de Acordo:**\n"
+            "- Conveniência de negociação extrajudicial\n"
+            "- Condições mínimas e máximas aceitáveis\n\n"
+            "Seja objetivo e use probabilidades percentuais quando possível. "
+            "Fundamente cada afirmação nos documentos ou precedentes analisados."
+        ),
+        tools=["Read", "Grep", "Glob"],
+    ),
+
+    "advogado-orientador": AgentDefinition(
+        description=(
+            "🎯 Especialista em orientação jurídica prática. "
+            "Transforma a análise e estratégia em recomendações concretas e "
+            "acionáveis com prazos, prioridades e plano de ação para o advogado."
+        ),
+        prompt=(
+            "Você é um advogado orientador com especialização em contencioso "
+            "civil, trabalhista e tributário. "
+            "Produza um plano de ação prático e objetivo:\n\n"
+            "**1. Medidas Urgentes (próximos 7 dias):**\n"
+            "- Ações imediatas com prazos fatais\n"
+            "- Providências processuais inadiáveis\n"
+            "- Documentos ou provas a obter urgentemente\n\n"
+            "**2. Plano de Ação (próximas 4-8 semanas):**\n"
+            "- Estratégia processual recomendada (passo a passo)\n"
+            "- Diligências probatórias e prazos\n"
+            "- Requerimentos e petições a protocolar\n\n"
+            "**3. Monitoramento Contínuo:**\n"
+            "- Prazos processuais a acompanhar\n"
+            "- Publicações a monitorar no DJe\n"
+            "- Riscos que exigem atenção especial\n\n"
+            "**4. Comunicação com o Cliente:**\n"
+            "- Pontos a esclarecer com o cliente\n"
+            "- Expectativas a alinhar sobre prazos e resultados\n\n"
+            "Seja direto e prático. O cliente precisa saber exatamente "
+            "o que fazer e quando."
+        ),
+        tools=["Read", "Grep", "Glob"],
     ),
 }
 
@@ -297,14 +380,18 @@ def executar(
 # ─── Integração com Workspace ─────────────────────────────────────────────────
 
 _SYSTEM_PROMPT_SQUAD = (
-    "Você é o coordenador do squad analista-processual. "
-    "Orquestre os agentes especializados para análise jurídica completa:\n\n"
-    "1. 'leitor-de-pecas' — extrai e estrutura informações de cada documento\n"
-    "2. 'pesquisador-juridico' — busca jurisprudência e legislação relevante\n"
-    "3. 'relator-processual' — consolida tudo no relatório estratégico final\n\n"
-    "O relatório deve ser salvo no caminho especificado no prompt. "
-    "Considere TODAS as instruções do usuário ao direcionar a análise. "
-    "Se houver 'Instrução Adicional (prioridade alta)', priorize-a sobre as demais."
+    "Você é o coordenador do squad analista-processual (5 agentes especializados). "
+    "Orquestre os agentes em ordem para uma análise jurídica completa e estratégica:\n\n"
+    "1. **leitor-de-pecas** — lê todos os documentos e extrai informações estruturadas\n"
+    "2. **pesquisador-juridico** — busca jurisprudência, legislação e doutrina relevante\n"
+    "3. **estrategista-processual** — avalia riscos, oportunidades e projeta cenários\n"
+    "4. **advogado-orientador** — define plano de ação prático com prazos e prioridades\n"
+    "5. **relator-processual** — consolida tudo no relatório estratégico final (salva em arquivo)\n\n"
+    "**Regras:**\n"
+    "- O relatório DEVE ser salvo no caminho especificado no prompt via ferramenta Write\n"
+    "- Considere TODAS as instruções do usuário ao direcionar cada agente\n"
+    "- Se houver 'Instrução Adicional (prioridade alta)', priorize-a\n"
+    "- O relator deve incluir o bloco ```citacoes``` rastreando as fontes documentais"
 )
 
 _SYSTEM_PROMPT_CHAT = (
@@ -431,6 +518,66 @@ def _montar_prompt_analise(
     return "\n".join(secoes)
 
 
+def _extrair_e_registrar_citacoes(
+    ws: "DemandaWorkspace",
+    caminho_relatorio: "Path",
+    resultado_texto: str,
+) -> None:
+    """
+    Extrai citações do bloco ```citacoes``` no relatório e registra no workspace.
+    Formato esperado no relatório:
+      ```citacoes
+      documento: nome.pdf
+      trecho: texto referenciado
+      tipo: fundamento_legal|prova|precedente|fato
+      ---
+      ```
+    """
+    import re as _re
+
+    citacoes: list[dict] = []
+    bloco = _re.search(r"```citacoes\s*(.*?)```", resultado_texto, _re.DOTALL | _re.IGNORECASE)
+
+    if bloco:
+        texto_bloco = bloco.group(1)
+        entradas = texto_bloco.strip().split("---")
+        for entrada in entradas:
+            campos: dict = {}
+            for linha in entrada.strip().splitlines():
+                if ":" in linha:
+                    chave, _, valor = linha.partition(":")
+                    campos[chave.strip().lower()] = valor.strip()
+            if campos.get("documento"):
+                citacoes.append({
+                    "documento": campos.get("documento", ""),
+                    "trecho": campos.get("trecho", ""),
+                    "tipo": campos.get("tipo", "referencia"),
+                })
+
+    # Também tenta ler o arquivo salvo se o resultado não tem as citações
+    if not citacoes and caminho_relatorio.exists():
+        conteudo = caminho_relatorio.read_text(encoding="utf-8")
+        bloco = _re.search(r"```citacoes\s*(.*?)```", conteudo, _re.DOTALL | _re.IGNORECASE)
+        if bloco:
+            texto_bloco = bloco.group(1)
+            entradas = texto_bloco.strip().split("---")
+            for entrada in entradas:
+                campos = {}
+                for linha in entrada.strip().splitlines():
+                    if ":" in linha:
+                        chave, _, valor = linha.partition(":")
+                        campos[chave.strip().lower()] = valor.strip()
+                if campos.get("documento"):
+                    citacoes.append({
+                        "documento": campos.get("documento", ""),
+                        "trecho": campos.get("trecho", ""),
+                        "tipo": campos.get("tipo", "referencia"),
+                    })
+
+    if citacoes:
+        ws.registrar_citacoes(str(caminho_relatorio), citacoes)
+
+
 async def _analisar_demanda(
     ws: "DemandaWorkspace",
     instrucao_extra: str | None = None,
@@ -484,11 +631,24 @@ async def _analisar_demanda(
 
     resultado = ""
     async for message in query(prompt=prompt_final, options=options):
-        if isinstance(message, ResultMessage):
+        if isinstance(message, TaskProgressMessage):
+            agente = message.last_tool_name or ""
+            desc = message.description or ""
+            if agente and desc:
+                _notificar(f"@{agente}: {desc}")
+            elif agente:
+                _notificar(f"@{agente} em execução…")
+            elif desc:
+                _notificar(desc)
+        elif isinstance(message, ResultMessage):
             resultado = message.result
 
     ws.registrar_analise(str(caminho_relatorio))
     ws.marcar_todos_analisados()
+
+    # Extrai citações do relatório gerado e registra no workspace
+    _extrair_e_registrar_citacoes(ws, caminho_relatorio, resultado)
+
     _notificar(f"Relatório salvo: {caminho_relatorio.name}")
 
     return resultado

@@ -4,6 +4,7 @@ from .squad import (
     consultar_demanda,
     abrir_squad,
     analisar_pdf_direto,
+    SQUAD_AGENTS,
 )
 from .workspace import (
     criar_demanda,
@@ -14,6 +15,7 @@ from .workspace import (
     DocIndexado,
     classificar_tipo_peca,
 )
+from .ui import construir_ui, iniciar as iniciar_ui
 
 __all__ = [
     # squad
@@ -22,6 +24,7 @@ __all__ = [
     "consultar_demanda",
     "abrir_squad",
     "analisar_pdf_direto",
+    "SQUAD_AGENTS",
     # workspace
     "criar_demanda",
     "listar_demandas",
@@ -30,4 +33,7 @@ __all__ = [
     "DemandaWorkspace",
     "DocIndexado",
     "classificar_tipo_peca",
+    # ui
+    "construir_ui",
+    "iniciar_ui",
 ]

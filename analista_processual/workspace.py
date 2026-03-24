@@ -250,7 +250,7 @@ class DemandaWorkspace:
                     if doc.foi_modificado(path):
                         doc.analisado = False
                         doc.analisado_em = None
-                        doc.hash_modificacao = str(int(path.stat().st_mtime))
+                        doc.hash_modificacao = DocIndexado._sha256(path)
                         doc.tamanho = _tamanho_humano(path.stat().st_size)
                 else:
                     doc = DocIndexado.de_arquivo(path, pasta_nome)
@@ -339,12 +339,21 @@ class DemandaWorkspace:
     # ── Instruções ────────────────────────────────────────────────────────────
 
     def ler_instrucoes(self) -> str:
-        if self.arquivo_instrucoes.exists():
-            return self.arquivo_instrucoes.read_text(encoding="utf-8").strip()
-        return ""
+        """Retorna instruções ativas como texto Markdown (backward compat)."""
+        ativas = self.listar_instrucoes_estruturadas()
+        if not ativas:
+            # Fallback para instrucoes.md simples
+            if self.arquivo_instrucoes.exists():
+                return self.arquivo_instrucoes.read_text(encoding="utf-8").strip()
+            return ""
+        linhas = [f"# Instruções e Notas — {self.nome_original()}\n"]
+        for inst in ativas:
+            ts = inst.get("criado_em", "")[:16].replace("T", " ")
+            linhas.append(f"\n---\n*{ts}*\n\n{inst['texto']}\n")
+        return "".join(linhas)
 
     def adicionar_instrucao(self, texto: str) -> None:
-        """Acrescenta instrução ao arquivo com timestamp."""
+        """Acrescenta instrução ao arquivo com timestamp (backward compat)."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         bloco = f"\n\n---\n*{ts}*\n\n{texto.strip()}\n"
         if self.arquivo_instrucoes.exists():
@@ -353,6 +362,64 @@ class DemandaWorkspace:
             conteudo = f"# Instruções e Notas — {self.nome_original()}\n"
         self.arquivo_instrucoes.write_text(conteudo + bloco, encoding="utf-8")
 
+    def listar_instrucoes_estruturadas(self) -> list[dict]:
+        """
+        Retorna instruções ativas como lista estruturada.
+        Migra automaticamente de instrucoes.md se necessário (lazy migration).
+        """
+        ctx = self._ler_contexto()
+
+        if "instrucoes" not in ctx:
+            instrucoes: list[dict] = []
+            if self.arquivo_instrucoes.exists():
+                conteudo = self.arquivo_instrucoes.read_text(encoding="utf-8").strip()
+                # Só migra se tiver conteúdo real além do cabeçalho padrão
+                linhas_reais = [
+                    l for l in conteudo.splitlines()
+                    if l.strip() and not l.startswith("#") and l.strip() != "---"
+                ]
+                if linhas_reais:
+                    instrucoes.append({
+                        "id": 1,
+                        "texto": conteudo,
+                        "criado_em": ctx.get("criado_em", datetime.now().isoformat()),
+                        "ativo": True,
+                        "migrado_de_arquivo": True,
+                    })
+            ctx["instrucoes"] = instrucoes
+            self._salvar_contexto(ctx)
+
+        return [i for i in ctx.get("instrucoes", []) if i.get("ativo", True)]
+
+    def adicionar_instrucao_estruturada(self, texto: str) -> int:
+        """Adiciona instrução estruturada. Retorna o ID gerado."""
+        ctx = self._ler_contexto()
+        instrucoes = ctx.get("instrucoes", [])
+        novo_id = max((i.get("id", 0) for i in instrucoes), default=0) + 1
+        instrucoes.append({
+            "id": novo_id,
+            "texto": texto.strip(),
+            "criado_em": datetime.now().isoformat(),
+            "ativo": True,
+        })
+        ctx["instrucoes"] = instrucoes
+        self._salvar_contexto(ctx)
+        # Sync instrucoes.md para ferramentas externas
+        self.adicionar_instrucao(texto)
+        return novo_id
+
+    def remover_instrucao(self, id_instrucao: int) -> bool:
+        """Remove instrução por ID (soft delete). Retorna True se encontrou."""
+        ctx = self._ler_contexto()
+        instrucoes = ctx.get("instrucoes", [])
+        for inst in instrucoes:
+            if inst.get("id") == id_instrucao:
+                inst["ativo"] = False
+                ctx["instrucoes"] = instrucoes
+                self._salvar_contexto(ctx)
+                return True
+        return False
+
     # ── Relatório ─────────────────────────────────────────────────────────────
 
     def novo_caminho_relatorio(self) -> Path:
@@ -360,20 +427,133 @@ class DemandaWorkspace:
         ts = datetime.now().strftime("%Y-%m-%d_%H%M")
         return self.pasta_relatorio / f"relatorio_estrategico_{ts}.md"
 
-    def ultimo_relatorio(self) -> Path | None:
+    def listar_relatorios(self) -> list[Path]:
+        """Retorna todos os relatórios em ordem cronológica (mais recente primeiro)."""
         if not self.pasta_relatorio.exists():
-            return None
-        relatorios = sorted(
-            p for p in self.pasta_relatorio.iterdir()
-            if p.is_file() and p.suffix == ".md"
+            return []
+        return sorted(
+            (p for p in self.pasta_relatorio.iterdir() if p.is_file() and p.suffix == ".md"),
+            reverse=True,
         )
-        return relatorios[-1] if relatorios else None
+
+    def ultimo_relatorio(self) -> Path | None:
+        rels = self.listar_relatorios()
+        return rels[0] if rels else None
 
     def ler_ultimo_relatorio(self) -> str:
         rel = self.ultimo_relatorio()
         if rel and rel.exists():
             return rel.read_text(encoding="utf-8")
         return ""
+
+    def ler_relatorio(self, caminho: str | Path) -> str:
+        """Lê relatório específico pelo caminho."""
+        p = Path(caminho)
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+        return ""
+
+    # ── Citações ──────────────────────────────────────────────────────────────
+
+    def registrar_citacoes(
+        self,
+        caminho_relatorio: str | Path,
+        citacoes: list[dict],
+    ) -> None:
+        """
+        Registra citações extraídas de um relatório.
+        Cada citação: {"documento": str, "pagina": int|None, "trecho": str, "tipo": str}
+        """
+        ctx = self._ler_contexto()
+        historico = ctx.get("historico_citacoes", {})
+        nome_rel = Path(caminho_relatorio).name
+        historico[nome_rel] = {
+            "caminho": str(caminho_relatorio),
+            "registrado_em": datetime.now().isoformat(),
+            "citacoes": citacoes,
+        }
+        ctx["historico_citacoes"] = historico
+        self._salvar_contexto(ctx)
+
+    def ler_citacoes(self, caminho_relatorio: str | Path | None = None) -> list[dict]:
+        """
+        Retorna citações do último relatório (ou do especificado).
+        Retorna lista vazia se não houver citações registradas.
+        """
+        ctx = self._ler_contexto()
+        historico = ctx.get("historico_citacoes", {})
+        if not historico:
+            return []
+        if caminho_relatorio:
+            nome = Path(caminho_relatorio).name
+        else:
+            # Mais recente pelo timestamp de registro
+            entradas = sorted(
+                historico.items(),
+                key=lambda x: x[1].get("registrado_em", ""),
+                reverse=True,
+            )
+            nome = entradas[0][0] if entradas else None
+        if nome and nome in historico:
+            return historico[nome].get("citacoes", [])
+        return []
+
+    # ── Linha do tempo ────────────────────────────────────────────────────────
+
+    def timeline(self) -> list[dict]:
+        """
+        Retorna linha do tempo da demanda com eventos registrados em ordem cronológica.
+        Cada evento: {"data": str, "tipo": str, "descricao": str, "caminho": str|None}
+        """
+        ctx = self._ler_contexto()
+        eventos: list[dict] = []
+
+        # Criação
+        if "criado_em" in ctx:
+            eventos.append({
+                "data": ctx["criado_em"],
+                "tipo": "criacao",
+                "icone": "🗂️",
+                "descricao": f"Demanda criada: {self.nome_original()}",
+                "caminho": None,
+            })
+
+        # Documentos adicionados
+        indice = ctx.get("indice", {})
+        for chave, dados in sorted(
+            indice.items(), key=lambda x: x[1].get("adicionado_em", "")
+        ):
+            if dados.get("adicionado_em"):
+                eventos.append({
+                    "data": dados["adicionado_em"],
+                    "tipo": "documento",
+                    "icone": "📎",
+                    "descricao": (
+                        f"[{dados['pasta']}] **{dados['nome']}** — {dados.get('tipo', 'Documento')}"
+                    ),
+                    "caminho": dados.get("caminho"),
+                })
+
+        # Relatórios gerados
+        for rel_path in self.listar_relatorios():
+            m = re.search(r"(\d{4}-\d{2}-\d{2})_(\d{4})", rel_path.name)
+            if m:
+                hh, mm_ = m.group(2)[:2], m.group(2)[2:]
+                data_str = f"{m.group(1)}T{hh}:{mm_}:00"
+                ctx_citacoes = ctx.get("historico_citacoes", {})
+                n_citacoes = len(ctx_citacoes.get(rel_path.name, {}).get("citacoes", []))
+                desc = f"Relatório gerado: **{rel_path.name}**"
+                if n_citacoes:
+                    desc += f" ({n_citacoes} citações)"
+                eventos.append({
+                    "data": data_str,
+                    "tipo": "relatorio",
+                    "icone": "📊",
+                    "descricao": desc,
+                    "caminho": str(rel_path),
+                })
+
+        return sorted(eventos, key=lambda e: e["data"])
 
     # ── Resumo ────────────────────────────────────────────────────────────────
 
