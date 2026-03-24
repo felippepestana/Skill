@@ -34,15 +34,23 @@ from .workspace import (
     DemandaWorkspace,
 )
 from .squad import executar_demanda, consultar_demanda
+from . import auth as _auth
 
 
-# ─── Estado global da sessão ──────────────────────────────────────────────────
+# ─── Estado por sessão (gr.State — sem compartilhamento entre usuários) ────────
 
 class _Estado:
-    """Estado compartilhado da UI — lock por demanda, referência ao workspace ativo."""
-    ws: DemandaWorkspace | None = None
-    _locks: Dict[str, threading.Lock] = {}
-    _locks_mutex: threading.Lock = threading.Lock()
+    """
+    Estado isolado por sessão Gradio.
+    Cada usuário autenticado tem sua própria instância via gr.State().
+    NÃO usar como singleton de módulo.
+    """
+
+    def __init__(self) -> None:
+        self.ws: DemandaWorkspace | None = None
+        self.username: str = ""
+        self._locks: Dict[str, threading.Lock] = {}
+        self._locks_mutex: threading.Lock = threading.Lock()
 
     def lock_demanda(self, slug: str) -> threading.Lock:
         with self._locks_mutex:
@@ -56,9 +64,6 @@ class _Estado:
             lock.release()
             return False
         return True
-
-
-_estado = _Estado()
 
 
 # ─── Helpers de renderização ──────────────────────────────────────────────────
@@ -215,13 +220,13 @@ def _renderizar_timeline(ws: DemandaWorkspace | None) -> str:
     return "\n".join(linhas)
 
 
-def _lista_demandas_choices() -> list[str]:
-    return [ws.nome_original() for ws in listar_demandas()]
+def _lista_demandas_choices(username: str | None = None) -> list[str]:
+    return [ws.nome_original() for ws in listar_demandas(username)]
 
 
 # ─── Handlers de evento ───────────────────────────────────────────────────────
 
-def on_selecionar_demanda(nome: str):
+def on_selecionar_demanda(nome: str, estado: _Estado):
     """Seleciona uma demanda e atualiza todos os painéis."""
     _vazio = (
         _arvore_markdown(None),
@@ -231,73 +236,76 @@ def on_selecionar_demanda(nome: str):
         gr.update(interactive=False),
         "_Selecione uma demanda para ver as citações._",
         "_Selecione uma demanda para ver a linha do tempo._",
+        estado,
     )
     if not nome:
-        _estado.ws = None
+        estado.ws = None
         return _vazio
     try:
-        _estado.ws = obter_demanda(nome)
-        instrucoes = _estado.ws.ler_instrucoes()
-        relatorio = _estado.ws.ler_ultimo_relatorio()
-        citacoes = _renderizar_citacoes(_estado.ws)
-        timeline = _renderizar_timeline(_estado.ws)
+        estado.ws = obter_demanda(nome, estado.username or None)
+        instrucoes = estado.ws.ler_instrucoes()
+        relatorio = estado.ws.ler_ultimo_relatorio()
+        citacoes = _renderizar_citacoes(estado.ws)
+        timeline = _renderizar_timeline(estado.ws)
         return (
-            _arvore_markdown(_estado.ws),
+            _arvore_markdown(estado.ws),
             relatorio,
             gr.update(value=instrucoes, interactive=True),
             gr.update(interactive=True),
             gr.update(interactive=True),
             citacoes,
             timeline,
+            estado,
         )
     except FileNotFoundError:
-        _estado.ws = None
+        estado.ws = None
         return _vazio
 
 
-def on_criar_demanda(nome: str, lista_atual: list):
+def on_criar_demanda(nome: str, lista_atual: list, estado: _Estado):
     """Cria nova demanda e atualiza a lista."""
     nome = nome.strip()
     if not nome:
-        return gr.update(), lista_atual, "⚠️ Informe o nome da demanda."
+        return gr.update(), lista_atual, "⚠️ Informe o nome da demanda.", estado
     try:
-        ws = criar_demanda(nome)
-        _estado.ws = ws
-        novas = _lista_demandas_choices()
+        ws = criar_demanda(nome, estado.username or None)
+        estado.ws = ws
+        novas = _lista_demandas_choices(estado.username or None)
         return (
             gr.update(choices=novas, value=nome),
             novas,
             f"✔ Demanda **{nome}** criada.\n\nAdicione documentos em:\n"
             f"- `{ws.pasta_processo}/`\n- `{ws.pasta_documentos}/`",
+            estado,
         )
     except FileExistsError:
-        return gr.update(), lista_atual, f"⚠️ Demanda '{nome}' já existe."
+        return gr.update(), lista_atual, f"⚠️ Demanda '{nome}' já existe.", estado
 
 
-def on_upload_arquivo(arquivos: list, pasta: str):
+def on_upload_arquivo(arquivos: list, pasta: str, estado: _Estado):
     """Processa upload de arquivos para a demanda selecionada."""
-    if not _estado.ws:
+    if not estado.ws:
         return _arvore_markdown(None), "⚠️ Selecione uma demanda antes de enviar arquivos."
     if not arquivos:
-        return _arvore_markdown(_estado.ws), "Nenhum arquivo recebido."
+        return _arvore_markdown(estado.ws), "Nenhum arquivo recebido."
 
     msgs = []
     pasta_destino = "processo" if pasta == "Peças do Processo" else "documentos"
     for arq in arquivos:
         try:
-            doc = _estado.ws.adicionar_documento(arq.name, pasta_destino)
+            doc = estado.ws.adicionar_documento(arq.name, pasta_destino)
             msgs.append(f"✔ `{doc.nome}` — {doc.tipo}")
         except Exception as e:
             msgs.append(f"✖ {Path(arq.name).name}: {e}")
 
-    return _arvore_markdown(_estado.ws), "\n".join(msgs)
+    return _arvore_markdown(estado.ws), "\n".join(msgs)
 
 
-def on_salvar_instrucoes(texto: str):
+def on_salvar_instrucoes(texto: str, estado: _Estado):
     """Sobrescreve o arquivo de instruções."""
-    if not _estado.ws:
+    if not estado.ws:
         return "⚠️ Nenhuma demanda selecionada."
-    _estado.ws.arquivo_instrucoes.write_text(texto, encoding="utf-8")
+    estado.ws.arquivo_instrucoes.write_text(texto, encoding="utf-8")
     return "✔ Instruções salvas."
 
 
@@ -307,12 +315,12 @@ def _executar_em_thread(
     modo_analise: bool,
     mensagem: str,
     instrucao_extra: str,
-) -> "tuple[queue.Queue, threading.Thread]":
+    lock_demanda: threading.Lock,
+) -> "tuple[queue.Queue, threading.Thread, list, list]":
     """Executa a análise em thread e retorna a fila de progresso."""
     progresso_q: queue.Queue[str | None] = queue.Queue()
     resultado_holder: list[str] = [""]
     erro_holder: list[str] = [""]
-    lock_demanda = _estado.lock_demanda(slug)
 
     def _callback_prog(msg: str) -> None:
         progresso_q.put(msg)
@@ -344,6 +352,7 @@ def on_chat(
     historico: list[dict],
     modo_analise: bool,
     instrucao_extra: str,
+    estado: _Estado,
 ):
     """
     Handler de chat com streaming de progresso.
@@ -357,12 +366,12 @@ def on_chat(
         "", "", "", "",
     )
 
-    if not _estado.ws:
+    if not estado.ws:
         yield _sem_demanda
         return
 
-    slug = _estado.ws.nome
-    if _estado.esta_analisando(slug):
+    slug = estado.ws.nome
+    if estado.esta_analisando(slug):
         yield (
             historico + [
                 {"role": "user", "content": mensagem},
@@ -372,12 +381,13 @@ def on_chat(
         )
         return
 
-    ws_snapshot = _estado.ws
+    ws_snapshot = estado.ws
+    lock_demanda = estado.lock_demanda(slug)
     historico = historico + [{"role": "user", "content": mensagem}]
     yield historico + [{"role": "assistant", "content": "⏳ Iniciando…"}], "", "", "", ""
 
     progresso_q, thread, resultado_holder, erro_holder = _executar_em_thread(
-        ws_snapshot, slug, modo_analise, mensagem, instrucao_extra
+        ws_snapshot, slug, modo_analise, mensagem, instrucao_extra, lock_demanda
     )
 
     # Streaming de progresso
@@ -463,13 +473,14 @@ _TIPOS_DOCUMENTO = [
 
 
 def construir_ui() -> gr.Blocks:
-    demandas_iniciais = _lista_demandas_choices()
-
     with gr.Blocks(
         title=TITULO,
         css=CSS,
         theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
     ) as app:
+
+        # Estado isolado por sessão — NÃO é singleton de módulo
+        estado = gr.State(value=_Estado)
 
         # Cabeçalho
         with gr.Row():
@@ -489,7 +500,7 @@ def construir_ui() -> gr.Blocks:
                 with gr.Group():
                     demanda_dropdown = gr.Dropdown(
                         label="Demanda ativa",
-                        choices=demandas_iniciais,
+                        choices=[],  # populado em on_load via request.username
                         interactive=True,
                         allow_custom_value=False,
                     )
@@ -660,14 +671,28 @@ def construir_ui() -> gr.Blocks:
 
         # ── Eventos ───────────────────────────────────────────────────────────
 
+        # Carregar demandas do usuário ao abrir a sessão
+        def _on_load(request: gr.Request, est: _Estado) -> tuple:
+            username = request.username or ""
+            est.username = username
+            choices = _lista_demandas_choices(username or None)
+            return gr.update(choices=choices, value=None), est
+
+        app.load(
+            _on_load,
+            inputs=[estado],
+            outputs=[demanda_dropdown, estado],
+        )
+
         # Selecionar demanda
         demanda_dropdown.change(
             on_selecionar_demanda,
-            inputs=[demanda_dropdown],
+            inputs=[demanda_dropdown, estado],
             outputs=[
                 arvore_docs, editor_relatorio, editor_instrucoes,
                 btn_enviar, btn_delta,
                 painel_citacoes, painel_timeline,
+                estado,
             ],
         ).then(
             lambda txt: txt,
@@ -678,40 +703,39 @@ def construir_ui() -> gr.Blocks:
             outputs=[btn_gerar_doc, btn_delta],
         )
 
-        # Criar demanda — output corrigido: sem duplicata no dropdown
-        def _on_criar(nome, lista):
-            resultado = on_criar_demanda(nome, lista)
-            # resultado: (gr.update(choices, value), novas_choices, msg)
-            # Gradio 5.x: usar o mesmo componente apenas uma vez nos outputs
-            return resultado[0], resultado[2]
+        # Criar demanda
+        def _on_criar(nome, lista, est):
+            resultado = on_criar_demanda(nome, lista, est)
+            # resultado: (gr.update(choices,value), novas_choices, msg, estado)
+            return resultado[0], resultado[2], resultado[3]
 
         btn_criar.click(
             _on_criar,
-            inputs=[nova_nome, demanda_dropdown],
-            outputs=[demanda_dropdown, msg_criacao],
+            inputs=[nova_nome, demanda_dropdown, estado],
+            outputs=[demanda_dropdown, msg_criacao, estado],
         )
 
         # Upload de arquivos
         upload_btn.upload(
             on_upload_arquivo,
-            inputs=[upload_btn, pasta_upload],
+            inputs=[upload_btn, pasta_upload, estado],
             outputs=[arvore_docs, msg_upload],
         )
 
         # Salvar instruções
         btn_salvar_inst.click(
             on_salvar_instrucoes,
-            inputs=[editor_instrucoes],
+            inputs=[editor_instrucoes, estado],
             outputs=[msg_instrucoes],
         )
 
-        # Chat principal — inputs corrigidos: chat_input ≠ instrucao_extra_input
-        def _enviar_chat(msg, hist, modo, inst):
-            yield from on_chat(msg, hist, modo, inst)
+        # Chat principal
+        def _enviar_chat(msg, hist, modo, inst, est):
+            yield from on_chat(msg, hist, modo, inst, est)
 
         btn_enviar.click(
             _enviar_chat,
-            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input],
+            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input, estado],
             outputs=[chatbot, editor_relatorio, arvore_docs, painel_citacoes, painel_timeline],
         ).then(
             lambda txt: txt,
@@ -724,7 +748,7 @@ def construir_ui() -> gr.Blocks:
 
         chat_input.submit(
             _enviar_chat,
-            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input],
+            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input, estado],
             outputs=[chatbot, editor_relatorio, arvore_docs, painel_citacoes, painel_timeline],
         ).then(
             lambda txt: txt,
@@ -736,18 +760,18 @@ def construir_ui() -> gr.Blocks:
         )
 
         # Análise delta
-        def _delta_chat(hist):
-            if not _estado.ws:
+        def _delta_chat(hist, est):
+            if not est.ws:
                 yield hist + [{"role": "assistant", "content": "⚠️ Selecione uma demanda."}], "", "", "", ""
                 return
 
-            slug = _estado.ws.nome
-            if _estado.esta_analisando(slug):
+            slug = est.ws.nome
+            if est.esta_analisando(slug):
                 yield hist + [{"role": "assistant", "content": "⏳ Análise em andamento. Aguarde."}], "", "", "", ""
                 return
 
-            ws_snapshot = _estado.ws
-            lock_demanda = _estado.lock_demanda(slug)
+            ws_snapshot = est.ws
+            lock_demanda = est.lock_demanda(slug)
             progresso_q: queue.Queue[str | None] = queue.Queue()
             resultado_holder: list[str] = [""]
             erro_holder: list[str] = [""]
@@ -782,7 +806,7 @@ def construir_ui() -> gr.Blocks:
                 if msg is None:
                     break
                 acum.append(f"- {msg}")
-                yield historico + [{"role": "assistant", "content": f"⏳ **Em andamento…**\n\n" + "\n".join(acum)}], "", "", "", ""
+                yield historico + [{"role": "assistant", "content": "⏳ **Em andamento…**\n\n" + "\n".join(acum)}], "", "", "", ""
 
             resposta = f"❌ {erro_holder[0]}" if erro_holder[0] else (resultado_holder[0] or "Delta concluído.")
             relatorio = ws_snapshot.ler_ultimo_relatorio()
@@ -796,7 +820,7 @@ def construir_ui() -> gr.Blocks:
 
         btn_delta.click(
             _delta_chat,
-            inputs=[chatbot],
+            inputs=[chatbot, estado],
             outputs=[chatbot, editor_relatorio, arvore_docs, painel_citacoes, painel_timeline],
         ).then(
             lambda txt: txt,
@@ -805,17 +829,17 @@ def construir_ui() -> gr.Blocks:
         )
 
         # Salvar relatório editado
-        def _salvar_relatorio(texto: str) -> str:
-            if not _estado.ws:
+        def _salvar_relatorio(texto: str, est: _Estado) -> str:
+            if not est.ws:
                 return "⚠️ Nenhuma demanda selecionada."
-            caminho = _estado.ws.novo_caminho_relatorio()
+            caminho = est.ws.novo_caminho_relatorio()
             caminho.write_text(texto, encoding="utf-8")
-            _estado.ws.registrar_analise(str(caminho))
+            est.ws.registrar_analise(str(caminho))
             return f"✔ Salvo: `{caminho.name}`"
 
         btn_salvar_rel.click(
             _salvar_relatorio,
-            inputs=[editor_relatorio],
+            inputs=[editor_relatorio, estado],
             outputs=[msg_salvar_rel],
         )
 
@@ -827,8 +851,8 @@ def construir_ui() -> gr.Blocks:
         )
 
         # Gerar documento com squad-documental
-        def _gerar_documento(tipo_doc: str, instrucoes_extras: str, hist: list):
-            if not _estado.ws:
+        def _gerar_documento(tipo_doc: str, instrucoes_extras: str, hist: list, est: _Estado):
+            if not est.ws:
                 yield hist, "⚠️ Selecione uma demanda.", ""
                 return
 
@@ -838,7 +862,7 @@ def construir_ui() -> gr.Blocks:
                 yield hist, "❌ Squad documental não disponível.", ""
                 return
 
-            ws_snapshot = _estado.ws
+            ws_snapshot = est.ws
             progresso_q: queue.Queue[str | None] = queue.Queue()
             resultado_holder: list[str] = [""]
             erro_holder: list[str] = [""]
@@ -881,7 +905,7 @@ def construir_ui() -> gr.Blocks:
 
         btn_gerar_doc.click(
             _gerar_documento,
-            inputs=[tipo_doc_dropdown, instrucoes_doc, chatbot],
+            inputs=[tipo_doc_dropdown, instrucoes_doc, chatbot, estado],
             outputs=[chatbot, progresso_doc, resultado_doc],
         )
 
@@ -895,12 +919,20 @@ def iniciar(
     port: int = 7860,
     share: bool = False,
     abrir_browser: bool = True,
+    com_auth: bool = True,
 ) -> None:
-    """Inicializa e abre a interface web."""
+    """
+    Inicializa e abre a interface web.
+
+    Args:
+        com_auth: Se True, exige login via banco de usuários (padrão).
+                  Se False, abre sem autenticação (uso local/desenvolvimento).
+    """
     print(f"\n{'─' * 60}")
     print(f"  ⚖️  Analista Processual — Interface Web")
     print(f"  Pasta base  : {pasta_base()}")
     print(f"  URL         : http://{host}:{port}")
+    print(f"  Auth        : {'habilitada' if com_auth else 'DESABILITADA (modo local)'}")
     print(f"  Squad       : 5 agentes (leitor + pesquisador + estrategista + orientador + relator)")
     print(f"{'─' * 60}\n")
     app = construir_ui()
@@ -909,5 +941,7 @@ def iniciar(
         server_port=port,
         share=share,
         inbrowser=abrir_browser,
-        show_error=True,
+        show_error=False,  # não expõe stack traces ao usuário final
+        auth=_auth.verificar_credenciais if com_auth else None,
+        auth_message="⚖️ Analista Processual — Faça login para acessar o workspace.",
     )

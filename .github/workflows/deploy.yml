@@ -1,0 +1,30 @@
+name: Deploy — Analista Processual
+
+# Dispara automaticamente ao fazer push na branch main
+on:
+  push:
+    branches:
+      - main
+  # Permite disparar manualmente no GitHub Actions
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy no VPS (Hostinger)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key:      ${{ secrets.VPS_SSH_KEY }}
+          port:     ${{ secrets.VPS_PORT || 22 }}
+          timeout:  120s
+          script: |
+            sudo bash /opt/analista/Skill/deploy/update.sh main
+            echo "Deploy concluído em $(date)"

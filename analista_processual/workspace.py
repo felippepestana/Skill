@@ -32,12 +32,17 @@ from pathlib import Path
 
 # ─── Pasta base ───────────────────────────────────────────────────────────────
 
-def _pasta_base() -> Path:
-    """Retorna a pasta raiz das demandas (DEMANDAS_DIR ou ~/demandas)."""
-    base = os.environ.get("DEMANDAS_DIR")
-    if base:
-        return Path(base).expanduser().resolve()
-    return Path.home() / "demandas"
+def _pasta_base(username: str | None = None) -> Path:
+    """
+    Retorna a pasta raiz das demandas.
+    - Com username: {base}/{username}/ (isolamento por usuário)
+    - Sem username: {base}/ (compatibilidade com CLI e uso local)
+    """
+    base_env = os.environ.get("DEMANDAS_DIR")
+    base = Path(base_env).expanduser().resolve() if base_env else Path.home() / "demandas"
+    if username:
+        return base / username.strip().lower()
+    return base
 
 
 # ─── Classificação automática de tipo de peça ─────────────────────────────────
@@ -656,14 +661,19 @@ class DemandaWorkspace:
 
 # ─── API pública ──────────────────────────────────────────────────────────────
 
-def criar_demanda(nome: str) -> DemandaWorkspace:
+def criar_demanda(nome: str, username: str | None = None) -> DemandaWorkspace:
     """
     Cria nova demanda com estrutura de pastas padrão.
+
+    Args:
+        nome: Nome da demanda (ex: "Fulano vs Ciclano 2024")
+        username: Usuário dono da demanda (isolamento por usuário na UI web).
+                  None = sem isolamento (CLI local).
 
     Raises:
         FileExistsError: se já existir.
     """
-    base = _pasta_base()
+    base = _pasta_base(username)
     slug = _slug(nome)
     caminho = base / slug
 
@@ -694,9 +704,14 @@ def criar_demanda(nome: str) -> DemandaWorkspace:
     return ws
 
 
-def listar_demandas() -> list[DemandaWorkspace]:
-    """Retorna todas as demandas ordenadas por nome."""
-    base = _pasta_base()
+def listar_demandas(username: str | None = None) -> list[DemandaWorkspace]:
+    """
+    Retorna todas as demandas ordenadas por nome.
+
+    Args:
+        username: Filtra demandas do usuário (None = pasta base raiz, uso local/CLI).
+    """
+    base = _pasta_base(username)
     if not base.exists():
         return []
     return sorted(
@@ -705,21 +720,25 @@ def listar_demandas() -> list[DemandaWorkspace]:
     )
 
 
-def obter_demanda(nome_ou_slug: str) -> DemandaWorkspace:
+def obter_demanda(nome_ou_slug: str, username: str | None = None) -> DemandaWorkspace:
     """
     Encontra demanda pelo nome ou slug.
+
+    Args:
+        nome_ou_slug: Nome original ou slug da demanda.
+        username: Restringe busca ao espaço do usuário (None = busca global, uso local/CLI).
 
     Raises:
         FileNotFoundError: se não existir.
     """
-    base = _pasta_base()
+    base = _pasta_base(username)
     slug = _slug(nome_ou_slug)
 
     direto = base / slug
     if direto.exists():
         return DemandaWorkspace(direto)
 
-    for ws in listar_demandas():
+    for ws in listar_demandas(username):
         ctx = ws._ler_contexto()
         if ctx.get("nome_original", "").lower() == nome_ou_slug.lower():
             return ws
@@ -731,8 +750,8 @@ def obter_demanda(nome_ou_slug: str) -> DemandaWorkspace:
     )
 
 
-def pasta_base() -> Path:
+def pasta_base(username: str | None = None) -> Path:
     """Retorna (e cria se necessário) a pasta base das demandas."""
-    base = _pasta_base()
+    base = _pasta_base(username)
     base.mkdir(parents=True, exist_ok=True)
     return base

@@ -1,0 +1,44 @@
+# systemd unit — Analista Processual
+# Instalar em: /etc/systemd/system/analista-processual.service
+# Habilitar:   systemctl enable --now analista-processual
+
+[Unit]
+Description=Analista Processual — Workspace Jurídico Multi-Agente
+Documentation=https://github.com/felippepestana/Skill
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=analista
+Group=analista
+WorkingDirectory=/opt/analista/Skill
+
+# Segredos em arquivo separado (não commitado no git)
+# Criar com: sudo nano /etc/analista/secrets.env
+# Conteúdo mínimo:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   DEMANDAS_DIR=/opt/analista/demandas
+EnvironmentFile=/etc/analista/secrets.env
+
+# Comando de inicialização — escuta apenas localhost (nginx faz o proxy)
+ExecStart=/opt/analista/venv/bin/python -m analista_processual --host 127.0.0.1 --port 7860
+
+# Reinício automático em caso de falha
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Logs via journald (ver com: journalctl -u analista-processual -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=analista-processual
+
+# Limites de recursos
+LimitNOFILE=65536
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
