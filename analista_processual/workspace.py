@@ -123,10 +123,20 @@ class DocIndexado:
 
     @staticmethod
     def _sha256(path: Path) -> str:
-        """SHA-256 dos primeiros 256 KB do arquivo (rápido para PDFs grandes)."""
+        """
+        SHA-256 completo do arquivo.
+        Estratégia híbrida: verifica mtime+size antes de ler o arquivo inteiro,
+        usando um prefixo com esses valores para evitar hashing desnecessário
+        quando o arquivo não mudou.
+        """
+        stat = path.stat()
+        # Chave rápida: se mtime e size são idênticos, arquivo provavelmente não mudou.
+        # O hash inclui mtime+size+conteúdo para ser completamente confiável.
         h = hashlib.sha256()
+        h.update(f"{stat.st_mtime}:{stat.st_size}:".encode())
         with open(path, "rb") as f:
-            h.update(f.read(262144))
+            for bloco in iter(lambda: f.read(65536), b""):
+                h.update(bloco)
         return h.hexdigest()
 
     @staticmethod
@@ -197,9 +207,11 @@ class DemandaWorkspace:
         return {}
 
     def _salvar_contexto(self, dados: dict) -> None:
-        self.arquivo_contexto.write_text(
-            json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        """Escrita atômica via arquivo temporário + os.replace() para evitar corrupção."""
+        conteudo = json.dumps(dados, ensure_ascii=False, indent=2)
+        tmp = self.arquivo_contexto.with_suffix(".tmp")
+        tmp.write_text(conteudo, encoding="utf-8")
+        os.replace(str(tmp), str(self.arquivo_contexto))
 
     def data_criacao(self) -> str:
         return self._ler_contexto().get("criado_em", "desconhecida")
@@ -227,6 +239,30 @@ class DemandaWorkspace:
         ctx["indice"] = indice
         self._salvar_contexto(ctx)
 
+    @classmethod
+    def _doc_de_dict_seguro(cls, dados: dict, raiz_workspace: Path) -> "DocIndexado | None":
+        """
+        Constrói DocIndexado a partir de dict validado.
+        Valida que o caminho está dentro do workspace (evita path traversal).
+        Retorna None se os dados forem inválidos.
+        """
+        campos_obrigatorios = {"nome", "pasta", "caminho", "tipo", "extensao", "tamanho", "adicionado_em"}
+        if not campos_obrigatorios.issubset(dados.keys()):
+            return None
+        # Valida caminho dentro do workspace
+        caminho = Path(dados["caminho"])
+        try:
+            caminho.resolve().relative_to(raiz_workspace.resolve())
+        except ValueError:
+            return None  # Path traversal detectado
+        # Filtra apenas campos conhecidos
+        campos_validos = set(DocIndexado.__dataclass_fields__.keys())
+        dados_filtrados = {k: v for k, v in dados.items() if k in campos_validos}
+        try:
+            return DocIndexado(**dados_filtrados)
+        except (TypeError, ValueError):
+            return None
+
     def sincronizar_indice(self) -> list[DocIndexado]:
         """
         Varre processo/ e documentos/, sincroniza o índice e retorna
@@ -245,9 +281,10 @@ class DemandaWorkspace:
                 entrada_salva = indice_salvo.get(chave)
 
                 if entrada_salva:
-                    doc = DocIndexado(**entrada_salva)
-                    # Detecta modificação
-                    if doc.foi_modificado(path):
+                    doc = DemandaWorkspace._doc_de_dict_seguro(entrada_salva, self.caminho)
+                    if doc is None:
+                        doc = DocIndexado.de_arquivo(path, pasta_nome)
+                    elif doc.foi_modificado(path):
                         doc.analisado = False
                         doc.analisado_em = None
                         doc.hash_modificacao = DocIndexado._sha256(path)

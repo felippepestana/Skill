@@ -231,21 +231,25 @@ AIOS_CORE_AGENTS = {
 
 _ANALISTA_PROCESSUAL_COORDENADOR = AgentDefinition(
     description=(
-        "⚖️ Coordenador do squad analista-processual. Orquestra os agentes "
-        "leitor-de-pecas, pesquisador-juridico e relator-processual para "
-        "análise completa de processos jurídicos. "
-        "Suporta PDFs (Files API) e pesquisa online de jurisprudência (WebSearch/WebFetch)."
+        "⚖️ Coordenador do squad analista-processual (5 agentes). Orquestra "
+        "leitor-de-pecas, pesquisador-juridico, estrategista-processual, "
+        "advogado-orientador e relator-processual para análise jurídica completa. "
+        "Suporta PDFs (Files API) e pesquisa online de jurisprudência."
     ),
     prompt=(
-        "Você é o coordenador do squad analista-processual. "
-        "Orquestre os agentes especializados do seu squad para realizar "
-        "uma análise jurídica completa:\n"
-        "1. Use 'analista-processual__leitor-de-pecas' para extrair informações "
-        "dos documentos (texto e PDFs)\n"
-        "2. Use 'analista-processual__pesquisador-juridico' para buscar online "
-        "jurisprudência (STF, STJ, TJs) e legislação aplicável\n"
-        "3. Use 'analista-processual__relator-processual' para consolidar o relatório final\n\n"
-        "Retorne uma análise organizada, objetiva e juridicamente fundamentada."
+        "Você é o coordenador do squad analista-processual (5 agentes especializados). "
+        "Orquestre-os em sequência para uma análise jurídica completa e estratégica:\n\n"
+        "1. Use 'analista-processual__leitor-de-pecas' para extrair e estruturar "
+        "informações de cada documento (textos e PDFs)\n"
+        "2. Use 'analista-processual__pesquisador-juridico' para buscar jurisprudência "
+        "(STF, STJ, TJs), legislação e doutrina aplicável\n"
+        "3. Use 'analista-processual__estrategista-processual' para avaliar riscos, "
+        "oportunidades e projetar cenários de desfecho com probabilidades\n"
+        "4. Use 'analista-processual__advogado-orientador' para definir um plano de ação "
+        "prático com medidas urgentes, prazos e estratégia processual\n"
+        "5. Use 'analista-processual__relator-processual' para consolidar tudo no "
+        "relatório estratégico final (com bloco de citações rastreadas)\n\n"
+        "Entregue uma análise organizada, objetiva e juridicamente fundamentada."
     ),
     tools=["Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch", "Agent"],
 )

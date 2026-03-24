@@ -421,7 +421,7 @@ CSS = """
 #coluna-direita  { border-left:  1px solid var(--border-color-primary); padding-left:  14px; }
 
 /* Árvore de documentos */
-#arvore-docs     { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.83em; line-height: 1.6; }
+#arvore-docs     { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.83em; line-height: 1.6; max-height: 320px; overflow-y: auto; }
 
 /* Editor Markdown */
 #editor-relatorio textarea { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.84em; }
@@ -552,11 +552,8 @@ def construir_ui() -> gr.Blocks:
 
                 with gr.Row():
                     chat_input = gr.Textbox(
-                        label="Mensagem ou instrução",
-                        placeholder=(
-                            "Modo Análise: descreva o foco (ou deixe em branco para análise completa)\n"
-                            "Modo Consulta: faça uma pergunta sobre a demanda"
-                        ),
+                        label="Mensagem / Pergunta (Modo Consulta)",
+                        placeholder="Faça uma pergunta sobre a demanda…",
                         lines=2,
                         scale=4,
                     )
@@ -573,6 +570,13 @@ def construir_ui() -> gr.Blocks:
                         variant="secondary",
                         interactive=False,
                     )
+
+                instrucao_extra_input = gr.Textbox(
+                    label="Foco da análise (opcional — apenas no Modo Análise)",
+                    placeholder="Ex: foque na questão da prescrição; analise os riscos trabalhistas",
+                    lines=1,
+                    visible=True,
+                )
 
                 gr.Markdown(
                     "_**5 agentes**: Leitor de Peças → Pesquisador Jurídico → "
@@ -674,11 +678,17 @@ def construir_ui() -> gr.Blocks:
             outputs=[btn_gerar_doc, btn_delta],
         )
 
-        # Criar demanda
+        # Criar demanda — output corrigido: sem duplicata no dropdown
+        def _on_criar(nome, lista):
+            resultado = on_criar_demanda(nome, lista)
+            # resultado: (gr.update(choices, value), novas_choices, msg)
+            # Gradio 5.x: usar o mesmo componente apenas uma vez nos outputs
+            return resultado[0], resultado[2]
+
         btn_criar.click(
-            on_criar_demanda,
+            _on_criar,
             inputs=[nova_nome, demanda_dropdown],
-            outputs=[demanda_dropdown, demanda_dropdown, msg_criacao],
+            outputs=[demanda_dropdown, msg_criacao],
         )
 
         # Upload de arquivos
@@ -695,13 +705,13 @@ def construir_ui() -> gr.Blocks:
             outputs=[msg_instrucoes],
         )
 
-        # Chat principal
+        # Chat principal — inputs corrigidos: chat_input ≠ instrucao_extra_input
         def _enviar_chat(msg, hist, modo, inst):
             yield from on_chat(msg, hist, modo, inst)
 
         btn_enviar.click(
             _enviar_chat,
-            inputs=[chat_input, chatbot, modo_toggle, chat_input],
+            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input],
             outputs=[chatbot, editor_relatorio, arvore_docs, painel_citacoes, painel_timeline],
         ).then(
             lambda txt: txt,
@@ -714,7 +724,7 @@ def construir_ui() -> gr.Blocks:
 
         chat_input.submit(
             _enviar_chat,
-            inputs=[chat_input, chatbot, modo_toggle, chat_input],
+            inputs=[chat_input, chatbot, modo_toggle, instrucao_extra_input],
             outputs=[chatbot, editor_relatorio, arvore_docs, painel_citacoes, painel_timeline],
         ).then(
             lambda txt: txt,
