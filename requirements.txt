@@ -1,3 +1,4 @@
 claude-agent-sdk
 anthropic
 anyio
+gradio>=4.0

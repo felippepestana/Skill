@@ -296,90 +296,189 @@ def executar(
 
 # ─── Integração com Workspace ─────────────────────────────────────────────────
 
-async def _analisar_demanda(
-    ws: DemandaWorkspace,
-    instrucao_extra: str | None = None,
-) -> str:
+_SYSTEM_PROMPT_SQUAD = (
+    "Você é o coordenador do squad analista-processual. "
+    "Orquestre os agentes especializados para análise jurídica completa:\n\n"
+    "1. 'leitor-de-pecas' — extrai e estrutura informações de cada documento\n"
+    "2. 'pesquisador-juridico' — busca jurisprudência e legislação relevante\n"
+    "3. 'relator-processual' — consolida tudo no relatório estratégico final\n\n"
+    "O relatório deve ser salvo no caminho especificado no prompt. "
+    "Considere TODAS as instruções do usuário ao direcionar a análise. "
+    "Se houver 'Instrução Adicional (prioridade alta)', priorize-a sobre as demais."
+)
+
+_SYSTEM_PROMPT_CHAT = (
+    "Você é um assistente jurídico especializado com acesso ao contexto completo "
+    "desta demanda. Responda de forma objetiva e fundamentada, citando os documentos "
+    "e o relatório estratégico quando relevante. Use linguagem técnico-jurídica precisa. "
+    "Quando necessário, consulte os agentes especializados:\n"
+    "- 'pesquisador-juridico': para buscar jurisprudência ou legislação adicional\n"
+    "- 'leitor-de-pecas': para extrair informações específicas de um documento"
+)
+
+
+async def _extrair_pdfs_da_demanda(
+    ws: "DemandaWorkspace",
+    apenas_novos: bool = False,
+) -> tuple[str, list[str]]:
     """
-    Analisa todos os documentos de uma demanda e salva o relatório estratégico.
+    Extrai texto dos PDFs da demanda.
 
     Args:
-        ws:              Workspace da demanda.
-        instrucao_extra: Instrução pontual do usuário (não é salva no arquivo
-                         de instruções; use ws.adicionar_instrucao() para isso).
+        ws:           Workspace da demanda.
+        apenas_novos: Se True, processa apenas documentos não analisados ainda (modo delta).
+
+    Returns:
+        (contexto_pdfs_texto, lista_de_caminhos_processados)
     """
-    # ── 1. Coletando documentos ───────────────────────────────────────────────
-    pdfs = ws.todos_pdfs()
-    textos = ws.todos_textos()
+    from .workspace import DocIndexado
+
+    if apenas_novos:
+        docs_alvo = [d for d in ws.documentos_novos() if d.extensao == ".pdf"]
+        pdfs = [d.caminho for d in docs_alvo]
+    else:
+        pdfs = ws.todos_pdfs()
+
+    if not pdfs:
+        return "", []
+
+    client = _get_client()
+    partes: list[str] = [""] * len(pdfs)
+
+    async def _processar(i: int, pdf_path: str) -> None:
+        nome, texto = await _extrair_pdf_para_texto(pdf_path, client)
+        pasta = "processo" if f"{os.sep}processo{os.sep}" in pdf_path else "documentos"
+        tipo = ""
+        try:
+            from .workspace import classificar_tipo_peca
+            tipo = f" · {classificar_tipo_peca(nome)}"
+        except Exception:
+            pass
+        partes[i] = f"\n\n---\n### [{pasta}]{tipo} — {nome}\n\n{texto}"
+
+    async with anyio.create_task_group() as tg:
+        for i, pdf_path in enumerate(pdfs):
+            tg.start_soon(_processar, i, pdf_path)
+
+    return "".join(partes), pdfs
+
+
+def _montar_prompt_analise(
+    ws: "DemandaWorkspace",
+    instrucao_extra: str | None,
+    contexto_pdfs: str,
+    caminho_relatorio: str,
+    modo_delta: bool = False,
+) -> str:
+    """Monta o prompt completo para análise de demanda."""
     instrucoes_salvas = ws.ler_instrucoes()
+    textos = ws.todos_textos()
 
-    # ── 2. Extraindo PDFs ─────────────────────────────────────────────────────
-    contexto_pdfs = ""
-    if pdfs:
-        client = _get_client()
-        partes: list[str] = [""] * len(pdfs)
-
-        async def _processar(i: int, pdf_path: str) -> None:
-            nome, texto = await _extrair_pdf_para_texto(pdf_path, client)
-            pasta = "processo" if "processo" in pdf_path else "documentos"
-            partes[i] = f"\n\n---\n### [{pasta}] {nome}\n\n{texto}"
-
-        async with anyio.create_task_group() as tg:
-            for i, pdf_path in enumerate(pdfs):
-                tg.start_soon(_processar, i, pdf_path)
-
-        contexto_pdfs = "".join(partes)
-
-    # ── 3. Montando prompt ────────────────────────────────────────────────────
     secoes: list[str] = [
-        f"# Análise da Demanda: {ws.nome}",
+        f"# {'Atualização da Análise' if modo_delta else 'Análise'} da Demanda: {ws.nome_original()}",
         "",
-        "Realize uma análise jurídica completa de todos os documentos desta demanda.",
-        "Ao final, gere o **Relatório Estratégico** e salve-o no caminho indicado.",
     ]
 
+    if modo_delta:
+        secoes += [
+            "Esta é uma **atualização incremental** — novos documentos foram adicionados.",
+            "Integre as novas informações ao relatório estratégico existente.",
+            "",
+        ]
+    else:
+        secoes += [
+            "Realize uma análise jurídica completa de todos os documentos desta demanda.",
+            "",
+        ]
+
     if instrucoes_salvas:
-        secoes += ["", "## Instruções e Notas do Usuário", "", instrucoes_salvas]
+        secoes += ["## Instruções e Notas do Usuário", "", instrucoes_salvas, ""]
 
     if instrucao_extra:
-        secoes += ["", "## Instrução Adicional (prioridade alta)", "", instrucao_extra]
+        secoes += ["## Instrução Adicional (prioridade alta)", "", instrucao_extra, ""]
+
+    if modo_delta:
+        ultimo_rel = ws.ler_ultimo_relatorio()
+        if ultimo_rel:
+            secoes += [
+                "## Relatório Estratégico Existente (referência)",
+                "",
+                ultimo_rel[:4000] + ("\n\n[... truncado ...]" if len(ultimo_rel) > 4000 else ""),
+                "",
+            ]
 
     if textos:
-        secoes += ["", "## Documentos de Texto", ""]
+        secoes += ["## Documentos de Texto", ""]
         for t in textos:
-            secoes.append(f"- `{t}`  ← leia com a ferramenta Read")
+            try:
+                from .workspace import classificar_tipo_peca
+                tipo = classificar_tipo_peca(os.path.basename(t))
+            except Exception:
+                tipo = "Documento"
+            secoes.append(f"- `{t}` ({tipo})  ← leia com a ferramenta Read")
+        secoes.append("")
 
     if contexto_pdfs:
-        secoes += ["", "## Documentos PDF (texto já extraído)", contexto_pdfs]
+        secoes += ["## Documentos PDF (texto extraído)", contexto_pdfs, ""]
 
-    # Caminho do relatório de saída
-    caminho_relatorio = ws.novo_caminho_relatorio()
     secoes += [
-        "",
         "## Saída esperada",
         "",
-        f"Salve o relatório estratégico em: `{caminho_relatorio}`",
+        f"Salve o relatório estratégico completo em: `{caminho_relatorio}`",
         "Use a ferramenta Write para gravar o arquivo Markdown.",
     ]
 
-    prompt_final = "\n".join(secoes)
+    return "\n".join(secoes)
 
-    # ── 4. Executando squad ───────────────────────────────────────────────────
+
+async def _analisar_demanda(
+    ws: "DemandaWorkspace",
+    instrucao_extra: str | None = None,
+    modo_delta: bool = False,
+    callback_progresso: "callable | None" = None,
+) -> str:
+    """
+    Analisa os documentos de uma demanda e salva o relatório estratégico.
+
+    Args:
+        ws:                  Workspace da demanda.
+        instrucao_extra:     Instrução pontual (não salva permanentemente).
+        modo_delta:          Se True, processa apenas documentos novos/modificados.
+        callback_progresso:  Função chamada com mensagens de progresso (para UI).
+    """
+    def _notificar(msg: str) -> None:
+        if callback_progresso:
+            try:
+                callback_progresso(msg)
+            except Exception:
+                pass
+
+    _notificar("Sincronizando índice de documentos…")
+    ws.sincronizar_indice()
+
+    if modo_delta:
+        novos = ws.documentos_novos()
+        if not novos:
+            return "Nenhum documento novo ou modificado. Análise delta dispensada."
+        _notificar(f"Modo delta: {len(novos)} documento(s) novo(s) ou modificado(s).")
+
+    _notificar("Extraindo PDFs…")
+    contexto_pdfs, pdfs_processados = await _extrair_pdfs_da_demanda(
+        ws, apenas_novos=modo_delta
+    )
+
+    caminho_relatorio = ws.novo_caminho_relatorio()
+    prompt_final = _montar_prompt_analise(
+        ws, instrucao_extra, contexto_pdfs, str(caminho_relatorio), modo_delta
+    )
+
+    _notificar("Iniciando análise com o squad…")
     options = ClaudeAgentOptions(
         cwd=str(ws.caminho),
         allowed_tools=["Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch", "Agent"],
         permission_mode="acceptEdits",
         agents=SQUAD_AGENTS,
-        system_prompt=(
-            "Você é o coordenador do squad analista-processual. "
-            "Orquestre os agentes especializados para análise jurídica completa:\n\n"
-            "1. 'leitor-de-pecas' — extrai e estrutura informações de cada documento\n"
-            "2. 'pesquisador-juridico' — busca jurisprudência e legislação relevante\n"
-            "3. 'relator-processual' — consolida tudo no relatório estratégico final\n\n"
-            "O relatório deve ser salvo no caminho especificado no prompt. "
-            "Considere TODAS as instruções do usuário ao direcionar a análise. "
-            "Se houver 'Instrução Adicional', ela tem prioridade sobre as demais."
-        ),
+        system_prompt=_SYSTEM_PROMPT_SQUAD,
         max_turns=30,
     )
 
@@ -388,29 +487,98 @@ async def _analisar_demanda(
         if isinstance(message, ResultMessage):
             resultado = message.result
 
-    # ── 5. Registrando ────────────────────────────────────────────────────────
     ws.registrar_analise(str(caminho_relatorio))
+    ws.marcar_todos_analisados()
+    _notificar(f"Relatório salvo: {caminho_relatorio.name}")
+
+    return resultado
+
+
+async def _consultar_demanda(
+    ws: "DemandaWorkspace",
+    pergunta: str,
+) -> str:
+    """
+    Modo chat: faz uma pergunta sobre a demanda sem gerar novo relatório.
+    Usa o relatório existente + documentos como contexto.
+    """
+    ultimo_rel = ws.ler_ultimo_relatorio()
+    instrucoes = ws.ler_instrucoes()
+
+    secoes: list[str] = [
+        f"# Consulta sobre a Demanda: {ws.nome_original()}",
+        "",
+        f"**Pergunta do usuário:** {pergunta}",
+        "",
+    ]
+
+    if ultimo_rel:
+        secoes += [
+            "## Relatório Estratégico (contexto)",
+            "",
+            ultimo_rel[:6000] + ("\n\n[... truncado ...]" if len(ultimo_rel) > 6000 else ""),
+            "",
+        ]
+
+    if instrucoes:
+        secoes += ["## Instruções e Notas", "", instrucoes, ""]
+
+    docs = ws.sincronizar_indice()
+    if docs:
+        secoes += ["## Documentos disponíveis", ""]
+        for d in docs:
+            secoes.append(f"- [{d.pasta}] `{d.nome}` — {d.tipo}")
+        secoes += [
+            "",
+            "Use a ferramenta Read para acessar o conteúdo de qualquer documento acima.",
+        ]
+
+    prompt_final = "\n".join(secoes)
+
+    options = ClaudeAgentOptions(
+        cwd=str(ws.caminho),
+        allowed_tools=["Read", "Grep", "Glob", "WebSearch", "WebFetch", "Agent"],
+        permission_mode="acceptEdits",
+        agents=SQUAD_AGENTS,
+        system_prompt=_SYSTEM_PROMPT_CHAT,
+        max_turns=15,
+    )
+
+    resultado = ""
+    async for message in query(prompt=prompt_final, options=options):
+        if isinstance(message, ResultMessage):
+            resultado = message.result
 
     return resultado
 
 
 def executar_demanda(
-    ws: DemandaWorkspace,
+    ws: "DemandaWorkspace",
     instrucao_extra: str | None = None,
+    modo_delta: bool = False,
+    callback_progresso: "callable | None" = None,
 ) -> str:
     """
     Executa a análise completa de uma demanda de forma síncrona.
 
     Args:
-        ws:              Workspace da demanda (obtido via workspace.obter_demanda()).
-        instrucao_extra: Instrução pontual do usuário para direcionar esta análise.
-                         Não é salva permanentemente; use ws.adicionar_instrucao()
-                         se quiser persistir a instrução para análises futuras.
-
-    Returns:
-        Resultado final do squad.
+        ws:                  Workspace da demanda.
+        instrucao_extra:     Instrução pontual para esta análise (não salva).
+        modo_delta:          Se True, reprocessa apenas docs novos/modificados.
+        callback_progresso:  Função chamada com mensagens de progresso (para UI).
     """
-    return anyio.run(_analisar_demanda, ws, instrucao_extra)
+    return anyio.run(_analisar_demanda, ws, instrucao_extra, modo_delta, callback_progresso)
+
+
+def consultar_demanda(
+    ws: "DemandaWorkspace",
+    pergunta: str,
+) -> str:
+    """
+    Modo chat: pergunta ao squad sobre a demanda sem gerar novo relatório.
+    Ideal para consultas pontuais após a análise inicial.
+    """
+    return anyio.run(_consultar_demanda, ws, pergunta)
 
 
 if __name__ == "__main__":
