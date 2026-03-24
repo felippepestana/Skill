@@ -21,6 +21,7 @@ Funcionalidades:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -121,9 +122,16 @@ class DocIndexado:
     hash_modificacao: str | None = None
 
     @staticmethod
+    def _sha256(path: Path) -> str:
+        """SHA-256 dos primeiros 256 KB do arquivo (rápido para PDFs grandes)."""
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            h.update(f.read(262144))
+        return h.hexdigest()
+
+    @staticmethod
     def de_arquivo(path: Path, pasta: str) -> "DocIndexado":
         stat = path.stat()
-        mtime = str(int(stat.st_mtime))
         return DocIndexado(
             nome=path.name,
             pasta=pasta,
@@ -132,17 +140,19 @@ class DocIndexado:
             extensao=path.suffix.lower(),
             tamanho=_tamanho_humano(stat.st_size),
             adicionado_em=datetime.fromtimestamp(stat.st_ctime).isoformat(),
-            hash_modificacao=mtime,
+            hash_modificacao=DocIndexado._sha256(path),
         )
 
     def foi_modificado(self, path: Path) -> bool:
-        """True se o arquivo foi modificado desde a última indexação."""
-        return str(int(path.stat().st_mtime)) != self.hash_modificacao
+        """True se o conteúdo do arquivo mudou desde a última indexação."""
+        return DocIndexado._sha256(path) != self.hash_modificacao
 
     def marcar_analisado(self) -> None:
         self.analisado = True
         self.analisado_em = datetime.now().isoformat()
-        self.hash_modificacao = str(int(Path(self.caminho).stat().st_mtime))
+        path = Path(self.caminho)
+        if path.exists():
+            self.hash_modificacao = DocIndexado._sha256(path)
 
 
 # ─── DemandaWorkspace ─────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 import queue
 from pathlib import Path
+from typing import Dict
 
 import gradio as gr
 
@@ -40,7 +41,22 @@ from .squad import executar_demanda, consultar_demanda
 class _Estado:
     """Estado compartilhado da UI (mutável via referência)."""
     ws: DemandaWorkspace | None = None
-    analisando: bool = False
+    # Lock por demanda: impede análises simultâneas na mesma demanda
+    _locks: Dict[str, threading.Lock] = {}
+    _locks_mutex: threading.Lock = threading.Lock()
+
+    def lock_demanda(self, slug: str) -> threading.Lock:
+        with self._locks_mutex:
+            if slug not in self._locks:
+                self._locks[slug] = threading.Lock()
+            return self._locks[slug]
+
+    def esta_analisando(self, slug: str) -> bool:
+        lock = self.lock_demanda(slug)
+        if lock.acquire(blocking=False):
+            lock.release()
+            return False
+        return True
 
 _estado = _Estado()
 
@@ -206,40 +222,42 @@ def on_chat(
         ], "", ""
         return
 
-    if _estado.analisando:
+    slug = _estado.ws.nome
+    if _estado.esta_analisando(slug):
         yield historico + [
             {"role": "user", "content": mensagem},
-            {"role": "assistant", "content": "⏳ Uma análise já está em andamento. Aguarde."},
+            {"role": "assistant", "content": "⏳ Uma análise já está em andamento para esta demanda. Aguarde."},
         ], "", ""
         return
 
     historico = historico + [{"role": "user", "content": mensagem}]
     yield historico + [{"role": "assistant", "content": "⏳ Processando…"}], "", ""
 
-    _estado.analisando = True
+    lock_demanda = _estado.lock_demanda(slug)
     progresso_q: queue.Queue[str] = queue.Queue()
     resultado_holder: list[str] = [""]
     erro_holder: list[str] = [""]
+    ws_snapshot = _estado.ws  # captura referência estável para a thread
 
     def _callback_prog(msg: str) -> None:
         progresso_q.put(msg)
 
     def _executar() -> None:
-        try:
-            if modo_analise:
-                resultado_holder[0] = executar_demanda(
-                    _estado.ws,
-                    instrucao_extra=instrucao_extra or None,
-                    modo_delta=False,
-                    callback_progresso=_callback_prog,
-                )
-            else:
-                resultado_holder[0] = consultar_demanda(_estado.ws, mensagem)
-        except Exception as e:
-            erro_holder[0] = str(e)
-        finally:
-            progresso_q.put(None)  # sentinela de fim
-            _estado.analisando = False
+        with lock_demanda:
+            try:
+                if modo_analise:
+                    resultado_holder[0] = executar_demanda(
+                        ws_snapshot,
+                        instrucao_extra=instrucao_extra or None,
+                        modo_delta=False,
+                        callback_progresso=_callback_prog,
+                    )
+                else:
+                    resultado_holder[0] = consultar_demanda(ws_snapshot, mensagem)
+            except Exception as e:
+                erro_holder[0] = str(e)
+            finally:
+                progresso_q.put(None)  # sentinela de fim
 
     thread = threading.Thread(target=_executar, daemon=True)
     thread.start()
@@ -495,7 +513,49 @@ def construir_ui() -> gr.Blocks:
             if not _estado.ws:
                 yield hist + [{"role": "assistant", "content": "⚠️ Selecione uma demanda."}], "", ""
                 return
-            yield from on_chat("Análise delta: processe apenas os novos documentos.", hist, True, "")
+            slug = _estado.ws.nome
+            if _estado.esta_analisando(slug):
+                yield hist + [{"role": "assistant", "content": "⏳ Análise em andamento. Aguarde."}], "", ""
+                return
+            ws_snapshot = _estado.ws
+            lock_demanda = _estado.lock_demanda(slug)
+            progresso_q: queue.Queue[str] = queue.Queue()
+            resultado_holder: list[str] = [""]
+            erro_holder: list[str] = [""]
+
+            def _cb(msg: str) -> None:
+                progresso_q.put(msg)
+
+            def _run() -> None:
+                with lock_demanda:
+                    try:
+                        resultado_holder[0] = executar_demanda(
+                            ws_snapshot,
+                            instrucao_extra=None,
+                            modo_delta=True,
+                            callback_progresso=_cb,
+                        )
+                    except Exception as e:
+                        erro_holder[0] = str(e)
+                    finally:
+                        progresso_q.put(None)
+
+            historico = hist + [{"role": "user", "content": "⚡ Análise Delta (novos documentos)"}]
+            yield historico + [{"role": "assistant", "content": "⏳ Verificando novos documentos…"}], "", ""
+            threading.Thread(target=_run, daemon=True).start()
+            acum = []
+            while True:
+                try:
+                    msg = progresso_q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if msg is None:
+                    break
+                acum.append(f"- {msg}")
+                yield historico + [{"role": "assistant", "content": f"⏳ **Em andamento…**\n\n" + "\n".join(acum)}], "", ""
+            resposta = erro_holder[0] and f"❌ {erro_holder[0]}" or resultado_holder[0] or "Delta concluído."
+            relatorio = ws_snapshot.ler_ultimo_relatorio()
+            yield historico + [{"role": "assistant", "content": resposta}], relatorio, _arvore_markdown(ws_snapshot)
 
         btn_delta.click(
             _delta_chat,
