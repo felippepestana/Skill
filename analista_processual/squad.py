@@ -11,12 +11,15 @@ Agentes do squad:
 Capacidades adicionais:
 - Suporte a PDF via Files API (anthropic-beta: files-api-2025-04-14)
 - Busca web de jurisprudência em STF, STJ, TJs e bases legais (LexML, JusBrasil, etc.)
+- Workspace por demanda — pasta base com subpastas processo/, documentos/, relatorio/
 """
 
 import os
 import anyio
 import anthropic
 from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition, ResultMessage
+
+from .workspace import DemandaWorkspace
 
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
@@ -289,6 +292,125 @@ def executar(
 ) -> str:
     """Executa o squad analista-processual de forma síncrona."""
     return anyio.run(abrir_squad, prompt, diretorio, pdfs)
+
+
+# ─── Integração com Workspace ─────────────────────────────────────────────────
+
+async def _analisar_demanda(
+    ws: DemandaWorkspace,
+    instrucao_extra: str | None = None,
+) -> str:
+    """
+    Analisa todos os documentos de uma demanda e salva o relatório estratégico.
+
+    Args:
+        ws:              Workspace da demanda.
+        instrucao_extra: Instrução pontual do usuário (não é salva no arquivo
+                         de instruções; use ws.adicionar_instrucao() para isso).
+    """
+    # ── 1. Coletando documentos ───────────────────────────────────────────────
+    pdfs = ws.todos_pdfs()
+    textos = ws.todos_textos()
+    instrucoes_salvas = ws.ler_instrucoes()
+
+    # ── 2. Extraindo PDFs ─────────────────────────────────────────────────────
+    contexto_pdfs = ""
+    if pdfs:
+        client = _get_client()
+        partes: list[str] = [""] * len(pdfs)
+
+        async def _processar(i: int, pdf_path: str) -> None:
+            nome, texto = await _extrair_pdf_para_texto(pdf_path, client)
+            pasta = "processo" if "processo" in pdf_path else "documentos"
+            partes[i] = f"\n\n---\n### [{pasta}] {nome}\n\n{texto}"
+
+        async with anyio.create_task_group() as tg:
+            for i, pdf_path in enumerate(pdfs):
+                tg.start_soon(_processar, i, pdf_path)
+
+        contexto_pdfs = "".join(partes)
+
+    # ── 3. Montando prompt ────────────────────────────────────────────────────
+    secoes: list[str] = [
+        f"# Análise da Demanda: {ws.nome}",
+        "",
+        "Realize uma análise jurídica completa de todos os documentos desta demanda.",
+        "Ao final, gere o **Relatório Estratégico** e salve-o no caminho indicado.",
+    ]
+
+    if instrucoes_salvas:
+        secoes += ["", "## Instruções e Notas do Usuário", "", instrucoes_salvas]
+
+    if instrucao_extra:
+        secoes += ["", "## Instrução Adicional (prioridade alta)", "", instrucao_extra]
+
+    if textos:
+        secoes += ["", "## Documentos de Texto", ""]
+        for t in textos:
+            secoes.append(f"- `{t}`  ← leia com a ferramenta Read")
+
+    if contexto_pdfs:
+        secoes += ["", "## Documentos PDF (texto já extraído)", contexto_pdfs]
+
+    # Caminho do relatório de saída
+    caminho_relatorio = ws.novo_caminho_relatorio()
+    secoes += [
+        "",
+        "## Saída esperada",
+        "",
+        f"Salve o relatório estratégico em: `{caminho_relatorio}`",
+        "Use a ferramenta Write para gravar o arquivo Markdown.",
+    ]
+
+    prompt_final = "\n".join(secoes)
+
+    # ── 4. Executando squad ───────────────────────────────────────────────────
+    options = ClaudeAgentOptions(
+        cwd=str(ws.caminho),
+        allowed_tools=["Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch", "Agent"],
+        permission_mode="acceptEdits",
+        agents=SQUAD_AGENTS,
+        system_prompt=(
+            "Você é o coordenador do squad analista-processual. "
+            "Orquestre os agentes especializados para análise jurídica completa:\n\n"
+            "1. 'leitor-de-pecas' — extrai e estrutura informações de cada documento\n"
+            "2. 'pesquisador-juridico' — busca jurisprudência e legislação relevante\n"
+            "3. 'relator-processual' — consolida tudo no relatório estratégico final\n\n"
+            "O relatório deve ser salvo no caminho especificado no prompt. "
+            "Considere TODAS as instruções do usuário ao direcionar a análise. "
+            "Se houver 'Instrução Adicional', ela tem prioridade sobre as demais."
+        ),
+        max_turns=30,
+    )
+
+    resultado = ""
+    async for message in query(prompt=prompt_final, options=options):
+        if isinstance(message, ResultMessage):
+            resultado = message.result
+
+    # ── 5. Registrando ────────────────────────────────────────────────────────
+    ws.registrar_analise(str(caminho_relatorio))
+
+    return resultado
+
+
+def executar_demanda(
+    ws: DemandaWorkspace,
+    instrucao_extra: str | None = None,
+) -> str:
+    """
+    Executa a análise completa de uma demanda de forma síncrona.
+
+    Args:
+        ws:              Workspace da demanda (obtido via workspace.obter_demanda()).
+        instrucao_extra: Instrução pontual do usuário para direcionar esta análise.
+                         Não é salva permanentemente; use ws.adicionar_instrucao()
+                         se quiser persistir a instrução para análises futuras.
+
+    Returns:
+        Resultado final do squad.
+    """
+    return anyio.run(_analisar_demanda, ws, instrucao_extra)
 
 
 if __name__ == "__main__":
