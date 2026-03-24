@@ -19,17 +19,40 @@ import anthropic
 from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition, ResultMessage
 
 
-# ─── Fontes jurídicas para pesquisa online ────────────────────────────────────
+# ─── Constantes ───────────────────────────────────────────────────────────────
+
+FILES_API_BETA = "files-api-2025-04-14"
 
 FONTES_JURIDICAS = [
-    "stf.jus.br",          # Supremo Tribunal Federal
-    "stj.jus.br",          # Superior Tribunal de Justiça
-    "tst.jus.br",          # Tribunal Superior do Trabalho
-    "lexml.gov.br",         # LexML — legislação federal e estadual
-    "planalto.gov.br",      # Portal da Legislação Federal
-    "jusbrasil.com.br",     # JusBrasil — jurisprudência consolidada
-    "conjur.com.br",        # Consultor Jurídico — doutrina e notícias
+    "stf.jus.br",       # Supremo Tribunal Federal
+    "stj.jus.br",       # Superior Tribunal de Justiça
+    "tst.jus.br",       # Tribunal Superior do Trabalho
+    "lexml.gov.br",     # LexML — legislação federal e estadual
+    "planalto.gov.br",  # Portal da Legislação Federal
+    "jusbrasil.com.br", # JusBrasil — jurisprudência consolidada
+    "conjur.com.br",    # Consultor Jurídico — doutrina e notícias
 ]
+
+
+# ─── Helpers internos ─────────────────────────────────────────────────────────
+
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    """Retorna o cliente Anthropic compartilhado (lazy singleton)."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()
+    return _client
+
+
+def _texto_da_resposta(message: anthropic.types.Message) -> str:
+    """Extrai o texto de uma mensagem, ignorando blocos de thinking."""
+    block = next((b for b in message.content if b.type == "text"), None)
+    if block is None:
+        raise ValueError("Resposta do modelo não contém bloco de texto.")
+    return block.text
 
 
 # ─── Agentes do squad ─────────────────────────────────────────────────────────
@@ -112,45 +135,40 @@ SQUAD_AGENTS = {
 
 # ─── Suporte a PDF via Files API ──────────────────────────────────────────────
 
-def carregar_pdf(caminho_pdf: str) -> dict:
+def carregar_pdf(
+    caminho_pdf: str,
+    client: anthropic.Anthropic | None = None,
+) -> dict:
     """
     Faz upload de um PDF para a Files API e retorna o bloco de documento
     pronto para uso no Messages API.
-
-    Args:
-        caminho_pdf: Caminho local para o arquivo PDF.
-
-    Returns:
-        Bloco de conteúdo com referência ao file_id para uso na API.
     """
-    client = anthropic.Anthropic()
+    client = client or _get_client()
+    nome = os.path.basename(caminho_pdf)
 
     with open(caminho_pdf, "rb") as f:
         uploaded = client.beta.files.upload(
-            file=(os.path.basename(caminho_pdf), f, "application/pdf"),
+            file=(nome, f, "application/pdf"),
         )
 
     return {
         "type": "document",
         "source": {"type": "file", "file_id": uploaded.id},
-        "title": os.path.basename(caminho_pdf),
+        "title": nome,
     }
 
 
-def analisar_pdf_direto(caminho_pdf: str, pergunta: str = None) -> str:
+def analisar_pdf_direto(
+    caminho_pdf: str,
+    pergunta: str | None = None,
+    client: anthropic.Anthropic | None = None,
+) -> str:
     """
     Analisa um PDF diretamente via Files API + Messages API com Opus 4.6.
     Use quando quiser analisar um único PDF sem acionar o squad completo.
-
-    Args:
-        caminho_pdf: Caminho local para o arquivo PDF.
-        pergunta: Pergunta ou instrução específica sobre o documento.
-
-    Returns:
-        Análise do documento pelo modelo.
     """
-    client = anthropic.Anthropic()
-    doc_block = carregar_pdf(caminho_pdf)
+    client = client or _get_client()
+    doc_block = carregar_pdf(caminho_pdf, client)
 
     instrucao = pergunta or (
         "Analise esta peça processual e extraia: tipo da peça, partes envolvidas, "
@@ -168,9 +186,39 @@ def analisar_pdf_direto(caminho_pdf: str, pergunta: str = None) -> str:
                 doc_block,
             ],
         }],
-        betas=["files-api-2025-04-14"],
+        betas=[FILES_API_BETA],
     ) as stream:
-        return stream.get_final_message().content[0].text
+        return _texto_da_resposta(stream.get_final_message())
+
+
+async def _extrair_pdf_para_texto(
+    pdf_path: str,
+    client: anthropic.Anthropic,
+) -> tuple[str, str]:
+    """Faz upload e extração de texto de um PDF. Retorna (nome, texto_extraido)."""
+    def _sync() -> tuple[str, str]:
+        doc_block = carregar_pdf(pdf_path, client)
+        with client.messages.stream(
+            model="claude-opus-4-6",
+            max_tokens=8000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Extraia o texto completo desta peça processual de forma "
+                            "estruturada para análise jurídica posterior."
+                        ),
+                    },
+                    doc_block,
+                ],
+            }],
+            betas=[FILES_API_BETA],
+        ) as stream:
+            return os.path.basename(pdf_path), _texto_da_resposta(stream.get_final_message())
+
+    return await anyio.to_thread.run_sync(_sync)
 
 
 # ─── Orquestrador principal ───────────────────────────────────────────────────
@@ -178,7 +226,7 @@ def analisar_pdf_direto(caminho_pdf: str, pergunta: str = None) -> str:
 async def abrir_squad(
     prompt: str,
     diretorio: str = ".",
-    pdfs: list[str] = None,
+    pdfs: list[str] | None = None,
 ) -> str:
     """
     Abre o squad analista-processual para analisar um processo.
@@ -187,43 +235,27 @@ async def abrir_squad(
         prompt:    Descrição da tarefa ou consulta processual.
         diretorio: Diretório de trabalho com os documentos do processo.
         pdfs:      Lista opcional de caminhos de PDFs a incluir na análise.
-
-    Returns:
-        Resultado da análise orquestrada pelo squad.
     """
-    # Se PDFs foram fornecidos, extrai o texto deles primeiro e anexa ao prompt
     contexto_pdfs = ""
     if pdfs:
-        client = anthropic.Anthropic()
-        for pdf_path in pdfs:
-            doc_block = carregar_pdf(pdf_path)
+        client = _get_client()
+        partes: list[str] = [""] * len(pdfs)
 
-            with client.messages.stream(
-                model="claude-opus-4-6",
-                max_tokens=8000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Extraia o texto completo desta peça processual de forma "
-                                "estruturada para análise jurídica posterior."
-                            ),
-                        },
-                        doc_block,
-                    ],
-                }],
-                betas=["files-api-2025-04-14"],
-            ) as stream:
-                texto_extraido = stream.get_final_message().content[0].text
+        async def _processar(i: int, pdf_path: str) -> None:
+            nome, texto = await _extrair_pdf_para_texto(pdf_path, client)
+            partes[i] = f"\n\n---\n### Documento: {nome}\n\n{texto}"
 
-            nome = os.path.basename(pdf_path)
-            contexto_pdfs += f"\n\n---\n### Documento: {nome}\n\n{texto_extraido}"
+        async with anyio.create_task_group() as tg:
+            for i, pdf_path in enumerate(pdfs):
+                tg.start_soon(_processar, i, pdf_path)
 
-    prompt_final = prompt
-    if contexto_pdfs:
-        prompt_final = f"{prompt}\n\n## Documentos PDF fornecidos:{contexto_pdfs}"
+        contexto_pdfs = "".join(partes)
+
+    prompt_final = (
+        f"{prompt}\n\n## Documentos PDF fornecidos:{contexto_pdfs}"
+        if contexto_pdfs
+        else prompt
+    )
 
     options = ClaudeAgentOptions(
         cwd=diretorio,
@@ -253,7 +285,7 @@ async def abrir_squad(
 def executar(
     prompt: str,
     diretorio: str = ".",
-    pdfs: list[str] = None,
+    pdfs: list[str] | None = None,
 ) -> str:
     """Executa o squad analista-processual de forma síncrona."""
     return anyio.run(abrir_squad, prompt, diretorio, pdfs)
@@ -262,7 +294,6 @@ def executar(
 if __name__ == "__main__":
     import sys
 
-    # Separa argumentos: PDFs começam com "--pdf"
     args = sys.argv[1:]
     pdfs_cli = [a for a in args if a.endswith(".pdf")]
     outros = [a for a in args if not a.endswith(".pdf")]
