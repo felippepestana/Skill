@@ -518,6 +518,42 @@ def _montar_prompt_analise(
     return "\n".join(secoes)
 
 
+def _parse_bloco_citacoes(texto_bloco: str) -> list[dict]:
+    """
+    Parseia o conteúdo do bloco ```citacoes```.
+    Suporta valores multi-linha (ex: trecho que continua na próxima linha).
+    Formato:
+      documento: nome.pdf
+      trecho: texto que pode
+        continuar aqui
+      tipo: fundamento_legal
+      ---
+    """
+    import re as _re
+
+    citacoes: list[dict] = []
+    for entrada in texto_bloco.strip().split("---"):
+        campos: dict[str, list[str]] = {}
+        campo_atual: str | None = None
+        for linha in entrada.splitlines():
+            # Linha com "chave: valor" — novo campo
+            m = _re.match(r"^([a-z_]+)\s*:\s*(.*)", linha.strip())
+            if m:
+                campo_atual = m.group(1).strip()
+                campos[campo_atual] = [m.group(2).strip()]
+            elif campo_atual and linha.strip():
+                # Continuação de valor multi-linha
+                campos[campo_atual].append(linha.strip())
+        campos_flat = {k: " ".join(v).strip() for k, v in campos.items()}
+        if campos_flat.get("documento"):
+            citacoes.append({
+                "documento": campos_flat.get("documento", ""),
+                "trecho": campos_flat.get("trecho", ""),
+                "tipo": campos_flat.get("tipo", "referencia"),
+            })
+    return citacoes
+
+
 def _extrair_e_registrar_citacoes(
     ws: "DemandaWorkspace",
     caminho_relatorio: "Path",
@@ -539,40 +575,14 @@ def _extrair_e_registrar_citacoes(
     bloco = _re.search(r"```citacoes\s*(.*?)```", resultado_texto, _re.DOTALL | _re.IGNORECASE)
 
     if bloco:
-        texto_bloco = bloco.group(1)
-        entradas = texto_bloco.strip().split("---")
-        for entrada in entradas:
-            campos: dict = {}
-            for linha in entrada.strip().splitlines():
-                if ":" in linha:
-                    chave, _, valor = linha.partition(":")
-                    campos[chave.strip().lower()] = valor.strip()
-            if campos.get("documento"):
-                citacoes.append({
-                    "documento": campos.get("documento", ""),
-                    "trecho": campos.get("trecho", ""),
-                    "tipo": campos.get("tipo", "referencia"),
-                })
+        citacoes = _parse_bloco_citacoes(bloco.group(1))
 
     # Também tenta ler o arquivo salvo se o resultado não tem as citações
     if not citacoes and caminho_relatorio.exists():
         conteudo = caminho_relatorio.read_text(encoding="utf-8")
         bloco = _re.search(r"```citacoes\s*(.*?)```", conteudo, _re.DOTALL | _re.IGNORECASE)
         if bloco:
-            texto_bloco = bloco.group(1)
-            entradas = texto_bloco.strip().split("---")
-            for entrada in entradas:
-                campos = {}
-                for linha in entrada.strip().splitlines():
-                    if ":" in linha:
-                        chave, _, valor = linha.partition(":")
-                        campos[chave.strip().lower()] = valor.strip()
-                if campos.get("documento"):
-                    citacoes.append({
-                        "documento": campos.get("documento", ""),
-                        "trecho": campos.get("trecho", ""),
-                        "tipo": campos.get("tipo", "referencia"),
-                    })
+            citacoes = _parse_bloco_citacoes(bloco.group(1))
 
     if citacoes:
         ws.registrar_citacoes(str(caminho_relatorio), citacoes)

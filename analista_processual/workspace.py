@@ -30,6 +30,12 @@ from datetime import datetime
 from pathlib import Path
 
 
+# Cache em memória para SHA-256: chave = (caminho, mtime, size) → hash
+# Evita re-leitura do arquivo quando mtime e tamanho não mudaram.
+_sha256_cache: dict[tuple, str] = {}
+_SHA256_CACHE_MAX = 2000  # entradas máximas antes de limpar as mais antigas
+
+
 # ─── Pasta base ───────────────────────────────────────────────────────────────
 
 def _pasta_base(username: str | None = None) -> Path:
@@ -129,20 +135,31 @@ class DocIndexado:
     @staticmethod
     def _sha256(path: Path) -> str:
         """
-        SHA-256 completo do arquivo.
-        Estratégia híbrida: verifica mtime+size antes de ler o arquivo inteiro,
-        usando um prefixo com esses valores para evitar hashing desnecessário
-        quando o arquivo não mudou.
+        SHA-256 do arquivo com cache em memória por (path, mtime, size).
+        Se mtime e tamanho não mudaram desde o último cálculo, retorna o hash
+        em cache sem ler o arquivo — O(1) para verificações repetidas.
         """
         stat = path.stat()
-        # Chave rápida: se mtime e size são idênticos, arquivo provavelmente não mudou.
-        # O hash inclui mtime+size+conteúdo para ser completamente confiável.
+        cache_key = (str(path), stat.st_mtime, stat.st_size)
+
+        if cache_key in _sha256_cache:
+            return _sha256_cache[cache_key]
+
         h = hashlib.sha256()
         h.update(f"{stat.st_mtime}:{stat.st_size}:".encode())
         with open(path, "rb") as f:
             for bloco in iter(lambda: f.read(65536), b""):
                 h.update(bloco)
-        return h.hexdigest()
+        resultado = h.hexdigest()
+
+        # Limpa metade do cache quando atinge o limite (preserva entradas recentes)
+        if len(_sha256_cache) >= _SHA256_CACHE_MAX:
+            chaves = list(_sha256_cache.keys())
+            for k in chaves[: _SHA256_CACHE_MAX // 2]:
+                del _sha256_cache[k]
+
+        _sha256_cache[cache_key] = resultado
+        return resultado
 
     @staticmethod
     def de_arquivo(path: Path, pasta: str) -> "DocIndexado":

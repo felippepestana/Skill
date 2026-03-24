@@ -13,8 +13,43 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+import threading
 from datetime import datetime
 from pathlib import Path
+
+
+# ─── Rate limiting em memória (brute-force protection) ────────────────────────
+
+_JANELA_SEGUNDOS = 300   # Janela deslizante de 5 minutos
+_MAX_TENTATIVAS = 10     # Máximo de falhas antes do bloqueio
+
+_tentativas_falhas: dict[str, list[float]] = {}
+_tentativas_lock = threading.Lock()
+
+
+def _verificar_rate_limit(username: str) -> bool:
+    """Retorna True se o login pode prosseguir, False se bloqueado."""
+    agora = time.monotonic()
+    with _tentativas_lock:
+        historico = _tentativas_falhas.get(username, [])
+        historico = [t for t in historico if agora - t < _JANELA_SEGUNDOS]
+        _tentativas_falhas[username] = historico
+        return len(historico) < _MAX_TENTATIVAS
+
+
+def _registrar_falha(username: str) -> None:
+    """Registra uma tentativa de login falha."""
+    with _tentativas_lock:
+        historico = _tentativas_falhas.get(username, [])
+        historico.append(time.monotonic())
+        _tentativas_falhas[username] = historico
+
+
+def _limpar_falhas(username: str) -> None:
+    """Remove o histórico de falhas após login bem-sucedido."""
+    with _tentativas_lock:
+        _tentativas_falhas.pop(username, None)
 
 
 # ─── Localização do banco ──────────────────────────────────────────────────────
@@ -84,21 +119,31 @@ except ImportError:
 
 def verificar_credenciais(username: str, password: str) -> bool:
     """
-    Verifica usuário e senha.
+    Verifica usuário e senha com proteção contra brute-force.
+    Após 10 tentativas falhas em 5 minutos, bloqueia o username.
     Usado diretamente como: app.launch(auth=verificar_credenciais)
     """
     if not username or not password:
         return False
+    username = username.strip().lower()
+    if not _verificar_rate_limit(username):
+        return False  # Bloqueado por excesso de tentativas falhas
     try:
         conn = _conectar()
         row = conn.execute(
             "SELECT password_hash, ativo FROM users WHERE username = ?",
-            (username.strip().lower(),),
+            (username,),
         ).fetchone()
         conn.close()
         if not row or not row["ativo"]:
+            _registrar_falha(username)
             return False
-        return _verificar_hash(password, row["password_hash"])
+        sucesso = _verificar_hash(password, row["password_hash"])
+        if sucesso:
+            _limpar_falhas(username)
+        else:
+            _registrar_falha(username)
+        return sucesso
     except Exception:
         return False
 
