@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --sidebar-width: 260px;
+    --panel-width: 380px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: Inter, system-ui, sans-serif;
+    @apply bg-gray-950 text-gray-100;
+  }
+
+  /* Scrollbar jurídica (slim) */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-900;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-600 rounded-full;
+  }
+}
+
+@layer components {
+  /* Card base */
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-xl;
+  }
+
+  /* Badge de risco */
+  .badge-critico  { @apply bg-red-500/20 text-red-400 border border-red-500/30; }
+  .badge-urgente  { @apply bg-yellow-500/20 text-yellow-400 border border-yellow-500/30; }
+  .badge-atencao  { @apply bg-blue-500/20 text-blue-400 border border-blue-500/30; }
+  .badge-ok       { @apply bg-green-500/20 text-green-400 border border-green-500/30; }
+
+  /* Agente ativo (streaming) */
+  .agente-ativo {
+    @apply animate-pulse text-apex-400 font-mono text-xs;
+  }
+
+  /* Markdown jurídico */
+  .prose-juridico {
+    @apply prose prose-invert prose-sm max-w-none;
+    @apply prose-headings:text-apex-300 prose-a:text-apex-400;
+  }
+}

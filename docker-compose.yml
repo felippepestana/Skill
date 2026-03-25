@@ -1,0 +1,65 @@
+version: "3.9"
+
+services:
+
+  # ── Backend: FastAPI + squad jurídico ──────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: apex-legal-backend:2.0
+    container_name: apex-legal-backend
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DEMANDAS_DIR=/data/demandas
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      - demandas_data:/data/demandas
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Frontend: Next.js ──────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../Dockerfile.frontend
+    image: apex-legal-frontend:2.0
+    container_name: apex-legal-frontend
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  # ── Gradio UI (legado — opcional) ─────────────────────────────────────────
+  gradio:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: apex-legal-backend:2.0
+    container_name: apex-legal-gradio
+    restart: unless-stopped
+    command: python -m analista_processual ui --host 0.0.0.0 --port 7860 --no-auth
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DEMANDAS_DIR=/data/demandas
+    volumes:
+      - demandas_data:/data/demandas
+    ports:
+      - "7860:7860"
+    profiles:
+      - gradio  # Ativa só com: docker compose --profile gradio up
+
+volumes:
+  demandas_data:
+    driver: local
