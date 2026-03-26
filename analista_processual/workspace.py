@@ -238,11 +238,34 @@ class DemandaWorkspace:
     def data_criacao(self) -> str:
         return self._ler_contexto().get("criado_em", "desconhecida")
 
+    # Alias para compatibilidade com a API REST
+    def criado_em(self) -> str:
+        return self.data_criacao()
+
+    def slug(self) -> str:
+        """Retorna o slug (nome da pasta) da demanda."""
+        return self.nome
+
     def ultima_analise(self) -> str | None:
         return self._ler_contexto().get("ultima_analise")
 
     def nome_original(self) -> str:
         return self._ler_contexto().get("nome_original", self.nome)
+
+    def total_documentos(self) -> int:
+        """Retorna o número total de documentos indexados."""
+        try:
+            return len(self.sincronizar_indice())
+        except Exception:
+            return 0
+
+    def citacoes_recentes(self) -> list[dict]:
+        """Retorna citações do último relatório (alias de ler_citacoes)."""
+        return self.ler_citacoes()
+
+    def caminho_ultimo_relatorio(self) -> "Path | None":
+        """Retorna o Path do último relatório (alias de ultimo_relatorio)."""
+        return self.ultimo_relatorio()
 
     def registrar_analise(self, caminho_relatorio: str) -> None:
         ctx = self._ler_contexto()

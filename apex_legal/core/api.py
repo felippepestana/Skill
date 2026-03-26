@@ -44,6 +44,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -198,8 +199,7 @@ def _auth_header(request) -> str:
 
 
 @app.get("/demandas", tags=["demandas"])
-async def listar(request: "Request"):
-    from starlette.requests import Request as _Request
+async def listar(request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     demandas = listar_demandas(username)
     return {"demandas": [
@@ -209,15 +209,14 @@ async def listar(request: "Request"):
             "criado_em": ws.criado_em(),
             "ultima_analise": ws.ultima_analise(),
             "total_docs": ws.total_documentos(),
-            "tem_relatorio": ws.ler_ultimo_relatorio() is not None,
+            "tem_relatorio": bool(ws.ler_ultimo_relatorio()),
         }
         for ws in demandas
     ]}
 
 
 @app.post("/demandas", status_code=201, tags=["demandas"])
-async def criar(req: CriarDemandaRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def criar(req: CriarDemandaRequest, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     try:
         ws = criar_demanda(req.nome, username)
@@ -227,8 +226,7 @@ async def criar(req: CriarDemandaRequest, request: "Request"):
 
 
 @app.get("/demandas/{slug}", tags=["demandas"])
-async def detalhes(slug: str, request: "Request"):
-    from starlette.requests import Request as _Request
+async def detalhes(slug: str, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     ws.sincronizar_indice()
@@ -238,7 +236,7 @@ async def detalhes(slug: str, request: "Request"):
         "criado_em": ws.criado_em(),
         "ultima_analise": ws.ultima_analise(),
         "instrucoes": ws.ler_instrucoes(),
-        "arvore": ws.arvore(),
+        "arvore": ws.resumo(),          # string formatada para exibição no frontend
         "citacoes": ws.citacoes_recentes(),
         "timeline": ws.timeline(),
     }
@@ -247,11 +245,10 @@ async def detalhes(slug: str, request: "Request"):
 @app.post("/demandas/{slug}/upload", tags=["demandas"])
 async def upload(
     slug: str,
-    request: "Request",
+    request: Request,
     arquivo: UploadFile = File(...),
-    pasta: str = Query("processo", regex="^(processo|documentos)$"),
+    pasta: str = Query("processo", pattern="^(processo|documentos)$"),
 ):
-    from starlette.requests import Request as _Request
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
 
@@ -266,8 +263,7 @@ async def upload(
 
 
 @app.put("/demandas/{slug}/instrucoes", tags=["demandas"])
-async def salvar_instrucoes(slug: str, req: InstrucoesRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def salvar_instrucoes(slug: str, req: InstrucoesRequest, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     ws.adicionar_instrucao_estruturada(req.texto)
@@ -275,19 +271,17 @@ async def salvar_instrucoes(slug: str, req: InstrucoesRequest, request: "Request
 
 
 @app.get("/demandas/{slug}/relatorio", tags=["demandas"])
-async def obter_relatorio(slug: str, request: "Request"):
-    from starlette.requests import Request as _Request
+async def obter_relatorio(slug: str, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     conteudo = ws.ler_ultimo_relatorio()
-    if conteudo is None:
+    if not conteudo:
         raise HTTPException(status_code=404, detail="Nenhum relatório disponível")
     return {"conteudo": conteudo}
 
 
 @app.put("/demandas/{slug}/relatorio", tags=["demandas"])
-async def salvar_relatorio(slug: str, req: RelatorioPatchRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def salvar_relatorio(slug: str, req: RelatorioPatchRequest, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     caminho = ws.caminho_ultimo_relatorio()
@@ -298,16 +292,14 @@ async def salvar_relatorio(slug: str, req: RelatorioPatchRequest, request: "Requ
 
 
 @app.get("/demandas/{slug}/citacoes", tags=["demandas"])
-async def obter_citacoes(slug: str, request: "Request"):
-    from starlette.requests import Request as _Request
+async def obter_citacoes(slug: str, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     return {"citacoes": ws.citacoes_recentes()}
 
 
 @app.get("/demandas/{slug}/timeline", tags=["demandas"])
-async def obter_timeline(slug: str, request: "Request"):
-    from starlette.requests import Request as _Request
+async def obter_timeline(slug: str, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     return {"timeline": ws.timeline()}
@@ -319,8 +311,7 @@ _jobs: dict[str, dict] = {}  # job_id → {status, resultado, progresso[]}
 
 
 @app.post("/demandas/{slug}/analisar", tags=["analise"])
-async def analisar(slug: str, req: AnalisarRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def analisar(slug: str, req: AnalisarRequest, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     job_id = _iniciar_job(ws, req.instrucao, modo_delta=False)
@@ -328,8 +319,7 @@ async def analisar(slug: str, req: AnalisarRequest, request: "Request"):
 
 
 @app.post("/demandas/{slug}/delta", tags=["analise"])
-async def delta(slug: str, req: AnalisarRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def delta(slug: str, req: AnalisarRequest, request: Request):
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
     job_id = _iniciar_job(ws, req.instrucao, modo_delta=True)
@@ -337,8 +327,7 @@ async def delta(slug: str, req: AnalisarRequest, request: "Request"):
 
 
 @app.post("/demandas/{slug}/consultar", tags=["analise"])
-async def consultar(slug: str, req: ConsultaRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def consultar(slug: str, req: ConsultaRequest, request: Request):
     from analista_processual.squad import consultar_demanda as _consultar
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
@@ -347,8 +336,7 @@ async def consultar(slug: str, req: ConsultaRequest, request: "Request"):
 
 
 @app.post("/demandas/{slug}/inteligencia", tags=["analise"])
-async def inteligencia(slug: str, request: "Request"):
-    from starlette.requests import Request as _Request
+async def inteligencia(slug: str, request: Request):
     from apex_legal.squads.inteligencia.squad import executar as _intel
     username = _resolver_usuario(request.headers.get("Authorization"))
     ws = _obter_ws(slug, username)
@@ -437,15 +425,13 @@ async def websocket_analise(ws_conn: WebSocket, slug: str, token: str = Query(..
 # ─── Admin ────────────────────────────────────────────────────────────────────
 
 @app.get("/usuarios", tags=["admin"])
-async def listar_users(request: "Request"):
-    from starlette.requests import Request as _Request
+async def listar_users(request: Request):
     _resolver_usuario(request.headers.get("Authorization"))
     return {"usuarios": listar_usuarios()}
 
 
 @app.put("/usuarios/{username}/plano", tags=["admin"])
-async def alterar_plano_usuario(username: str, req: AlterarPlanoRequest, request: "Request"):
-    from starlette.requests import Request as _Request
+async def alterar_plano_usuario(username: str, req: AlterarPlanoRequest, request: Request):
     _resolver_usuario(request.headers.get("Authorization"))
     try:
         alterar_plano(username, req.plano)
